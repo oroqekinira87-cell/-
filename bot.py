@@ -156,13 +156,14 @@ def btn(text, callback_data=None, url=None, emoji_id=None, style="primary"):
     return button
 
 # ==========================================
-# نظام الذكاء الاصطناعي (NSFW + التقييم)
+# نظام الذكاء الاصطناعي (حماية فائقة المشدد + التقييم)
 # ==========================================
 def analyze_photo(photo_file_id):
     """
-    يقوم بفحص الصورة بدقة عبر الذكاء الاصطناعي:
-    1. يفحص إذا كانت عارية أو شبه عارية أو إيحاء.
-    2. إذا كانت آمنة، يقوم بإنشاء وصف للصورة.
+    فحص الصورة بدقة عبر الذكاء الاصطناعي (3 طبقات حماية):
+    1. نموذج NSFW حساسيته عالية جداً.
+    2. وصف الصورة لمنع (البكيني، الملابس الداخلية، شبه العاري، الإيحاء).
+    3. فحص لون البشرة الاحتياطي.
     """
     try:
         file_info = bot.get_file(photo_file_id)
@@ -170,38 +171,50 @@ def analyze_photo(photo_file_id):
     except:
         return False, 'download_error', None
 
-    # 1. فحص الإباحية الصارم (نموذج HuggingFace)
+    # 1. فحص الإباحية الصارم جداً (HuggingFace NSFW Model)
     try:
         api_url = "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection"
-        response = requests.post(api_url, data=downloaded, timeout=15)
-        if response.status_code == 200:
-            result = response.json()
-            for item in result:
-                # عتبة صارمة جداً: أي نسبة إباحية فوق 30% يتم حظرها فوراً
-                if item.get('label', '').lower() == 'nsfw' and item.get('score', 0) > 0.30:
-                    return True, 'AI_Nsfw_Classifier', None
+        for attempt in range(3):
+            response = requests.post(api_url, data=downloaded, timeout=20)
+            if response.status_code == 200:
+                result = response.json()
+                for item in result:
+                    # عتبة صارمة جداً: أي نسبة إباحية فوق 15% يتم حظرها فوراً
+                    if item.get('label', '').lower() == 'nsfw' and item.get('score', 0) > 0.15:
+                        return True, 'AI_Nsfw_Classifier', None
+                break
+            elif response.status_code == 503:
+                time.sleep(5) # انتظار تحميل النموذج
     except: pass
 
-    # 2. توليد وصف للصورة لنفهم محتواها (كي نعطي تقييم حقيقي)
+    # 2. توليد وصف للصورة لفحص الإيحاءات والمحارم (BLIP Model)
     caption = None
     try:
         api_url_blip = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
-        response = requests.post(api_url_blip, data=downloaded, timeout=20)
-        if response.status_code == 200:
-            caption = response.json()[0].get('generated_text', '')
+        for attempt in range(3):
+            response = requests.post(api_url_blip, data=downloaded, timeout=20)
+            if response.status_code == 200:
+                caption = response.json()[0].get('generated_text', '')
+                break
+            elif response.status_code == 503:
+                time.sleep(5)
     except: pass
 
-    # 3. فحص النص للإيحاءات والإيماءات (شبه عارية، بزول، ترمة، إشارة)
+    # 3. فحص النص للإيحاءات والإيماءات (حظر البكيني والداخلية والمخالفات)
     if caption:
-        try:
-            prompt = f"Analyze this image description. Does it contain nudity, semi-nudity, sexual hints, sexual gestures, breasts, thighs, underwear, or any inappropriate content? Description: '{caption}'. Reply with only YES or NO."
-            encoded_prompt = requests.utils.quote(prompt)
-            text_res = requests.get(f"https://text.pollinations.ai/{encoded_prompt}", timeout=15)
-            if text_res.status_code == 200 and "yes" in text_res.text.lower():
-                return True, 'AI_Strict_Text_Check', caption
-        except: pass
+        # قائمة كلمات صارمة جداً لمنع شبه العارية
+        nsfw_keywords = [
+            "naked", "nude", "nudity", "bikini", "swimwear", "underwear", "bra", "panties", 
+            "lingerie", "cleavage", "topless", "bottomless", "thong", "erotic", "sexy", 
+            "undressed", "revealing", "midriff", "bare skin", "bare chest", "breasts", 
+            "butt", "buttocks", "boobs", "pussy", "dick", "penis", "vagina", "cleavage"
+        ]
+        caption_lower = caption.lower()
+        for word in nsfw_keywords:
+            if word in caption_lower:
+                return True, 'AI_Keyword_Strict_Check', caption
     else:
-        # فحص احتياطي للون البشرة إذا فشل الوصف
+        # 4. فحص احتياطي للون البشرة (إذا فشلت APIs الذكاء الاصطناعي)
         try:
             from PIL import Image
             img = Image.open(BytesIO(downloaded)).convert('RGB')
@@ -211,7 +224,8 @@ def analyze_photo(photo_file_id):
                 total_pixels += 1
                 if r > 95 and g > 40 and b > 20 and max(r, g, b) - min(r, g, b) > 15 and abs(r - g) > 15 and r > g and r > b:
                     skin_pixels += 1
-            if (skin_pixels / total_pixels if total_pixels > 0 else 0) > 0.45:
+            # إذا كانت نسبة الجلد المكشوف فوق 30%، يتم الحظر (تكون فعالة جداً لشبه العاري)
+            if (skin_pixels / total_pixels if total_pixels > 0 else 0) > 0.30:
                 return True, 'Skin_Tone_Fallback', None
         except: pass
 
@@ -241,7 +255,6 @@ def get_ai_rating_and_comment(caption, gender):
                 return int(match.group(1)), text
     except: pass
     
-    #fallback
     return None, None
 
 # ==========================================
@@ -331,12 +344,11 @@ def callback_listener(call):
         bot.send_chat_action(chat_id, 'typing')
         rating, sweet_words = get_ai_rating_and_comment(caption, call.data)
         
-        # في حال فشل الذكاء الاصطناعي، نستخدم التقييم العشوائي لتفادي تعطل البوت
         if not rating or not sweet_words:
             rating = random.randint(7, 10)
             sweet_words = random.choice(BOY_TEXTS if call.data == 'gender_boy' else GIRL_TEXTS)
         else:
-            rating = max(0, min(10, rating)) # ضمان أن التقييم بين 0 و 10
+            rating = max(0, min(10, rating))
             
         caption_text = f'> تقييم جديد وصل للقناة\n\n> الرأي: {escape_md(sweet_words)}\n> التقييم الإجمالي: {rating}/10'
         channel_markup = types.InlineKeyboardMarkup()
@@ -463,7 +475,6 @@ def handle_user_photo(message):
         cursor.execute('UPDATE users SET last_photo_time=? WHERE user_id=?', (current_time, user_id))
         conn.commit()
         
-    # حفظ الصورة مع الوصف الذي ولّده الذكاء الاصطناعي
     user_temp_photos[user_id] = {'photo_id': photo_id, 'caption': caption}
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(btn("ولد", callback_data='gender_boy', emoji_id=E['sparkles'], style="primary"), btn("بنت", callback_data='gender_girl', emoji_id=E['sparkles'], style="primary"))
