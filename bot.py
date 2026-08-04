@@ -12,6 +12,18 @@ from io import BytesIO
 import re
 
 # ==========================================
+# قاموس الإيموجيات المميزة (Premium Custom Emojis)
+# ==========================================
+E = {
+    'fire': '5424972470023104089', 'check': '5206607081334906820', 'sparkles': '5325547803936572038',
+    'gem': '5427168083074628963', 'pencil': '5395444784611480792', 'settings': '5341715473882955310',
+    'crown': '5217822164362739968', 'chart': '5231200819986047254', 'warning': '5447644880824181073',
+    'trophy': '5188344996356448758', 'people': '5258513401784573443', 'link': '5271604874419647061',
+    'picture': '5375074927252621134', 'arrow': '5416117059207572332', 'cross': '5210952531676504517',
+    'bulb': '5422439311196834318', 'bell': '5458603043203327669', 'python': '5260480440971570446',
+}
+
+# ==========================================
 # الإعدادات (تدعم متغيرات بيئة Render.com)
 # ==========================================
 API_TOKEN = os.environ.get('API_TOKEN', '8591586628:AAGo85RBCysZQ6Bvp1y3lLeI-85iuQRhJ0w')
@@ -23,7 +35,7 @@ bot = telebot.TeleBot(API_TOKEN, parse_mode='MarkdownV2')
 user_temp_photos = {}
 
 # ==========================================
-# خادم Flask والمنبه (Keep-Alive) لمنع التوقف على Render
+# خادم Flask والمنبه (Keep-Alive)
 # ==========================================
 app = Flask(__name__)
 
@@ -55,19 +67,14 @@ cursor.executescript('''
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    photos_rated INTEGER DEFAULT 0,
-    last_photo_time INTEGER DEFAULT 0,
-    nsfw_warnings INTEGER DEFAULT 0,
-    banned INTEGER DEFAULT 0
+    user_id INTEGER PRIMARY KEY, photos_rated INTEGER DEFAULT 0,
+    last_photo_time INTEGER DEFAULT 0, nsfw_warnings INTEGER DEFAULT 0, banned INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS nsfw_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER, photo_id TEXT, detected_at TEXT, method TEXT
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, photo_id TEXT, detected_at TEXT, method TEXT
 );
 ''')
 
-# تحديث الجداول إذا كانت قديمة
 columns_to_add = [
     ("photos_rated", "INTEGER DEFAULT 0"), ("last_photo_time", "INTEGER DEFAULT 0"),
     ("nsfw_warnings", "INTEGER DEFAULT 0"), ("banned", "INTEGER DEFAULT 0")
@@ -116,6 +123,14 @@ def check_sub(user_id):
         return member.status in ['creator', 'administrator', 'member']
     except: return True
 
+def btn(text, callback_data=None, url=None, emoji_id=None, style="primary"):
+    button_kwargs = {'text': text}
+    if url: button_kwargs['url'] = url
+    if callback_data: button_kwargs['callback_data'] = callback_data
+    if emoji_id: button_kwargs['icon_custom_emoji_id'] = emoji_id
+    if style: button_kwargs['style'] = style
+    return types.InlineKeyboardButton(**button_kwargs)
+
 # ==========================================
 # نظام الذكاء الاصطناعي (حماية فائقة المشدد + التقييم)
 # ==========================================
@@ -125,7 +140,7 @@ def analyze_photo(photo_file_id):
         downloaded = bot.download_file(file_info.file_path)
     except: return False, 'download_error', None
 
-    # 1. فحص الإباحية الصارم جداً (نموذج HuggingFace)
+    # 1. فحص الإباحية الصارم جداً
     try:
         api_url = "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection"
         response = requests.post(api_url, data=downloaded, timeout=20)
@@ -136,7 +151,7 @@ def analyze_photo(photo_file_id):
                     return True, 'AI_Nsfw_Classifier', None
     except: pass
 
-    # 2. توليد وصف للصورة لفحص الإيحاءات (نموذج BLIP)
+    # 2. توليد وصف للصورة لفحص الإيحاءات
     caption = None
     try:
         api_url_blip = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
@@ -156,7 +171,7 @@ def analyze_photo(photo_file_id):
         for word in nsfw_keywords:
             if word in caption_lower: return True, 'AI_Keyword_Strict_Check', caption
     else:
-        # 4. فحص احتياطي للون البشرة إذا فشل الذكاء الاصطناعي
+        # 4. فحص احتياطي للون البشرة
         try:
             from PIL import Image
             img = Image.open(BytesIO(downloaded)).convert('RGB')
@@ -189,29 +204,39 @@ def get_ai_rating_and_comment(caption, gender):
     return None, None
 
 # ==========================================
+# النصوص
+# ==========================================
+BOY_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبل وماكو منها.', 'ذوقك كلش راقي، كادر وإضاءة فد شيء روعة.', 'فد شيء على العقل! الجمال والترتيب بجهة وهالصورة بجهة.', 'طالع ملكي ونظرة تاخذ العقل، إبداع بلا حدود.', 'كلش حلو الصورة، طالع أنيق ومرتب.']
+GIRL_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبلين فيها وماكو منها.', 'ذوقج كلش راقي، طالعة فد شيء روعة ومميزة.', 'فد شيء على العقل! الجمال والترتيب بجهة وهالصورة بجهة.', 'طالعة ملكية ونظرة تاخذ العقل، إبداع بلا حدود.', 'كلش حلوة الصورة، تخبلين وطالعة تجننين.']
+
+with db_lock:
+    cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPER_ADMIN,))
+    conn.commit()
+
+# ==========================================
 # لوحة تحكم الأدمن الشاملة
 # ==========================================
 def send_admin_panel(chat_id, message_id=None):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("📢 قناة التقييم", callback_data='menu_channel'),
-        types.InlineKeyboardButton("🔔 الاشتراك الإجباري", callback_data='menu_sub')
+        btn("قناة التقييم", callback_data='menu_channel', emoji_id=E['link'], style="success"),
+        btn("الاشتراك الإجباري", callback_data='menu_sub', emoji_id=E['bell'], style="primary")
     )
     markup.add(
-        types.InlineKeyboardButton("👥 الأدمنية", callback_data='menu_admins'),
-        types.InlineKeyboardButton("🛡️ الحماية والمحظورين", callback_data='menu_protection')
+        btn("الأدمنية", callback_data='menu_admins', emoji_id=E['people'], style="primary"),
+        btn("الحماية والمحظورين", callback_data='menu_protection', emoji_id=E['warning'], style="danger")
     )
     markup.add(
-        types.InlineKeyboardButton("📊 الإحصائيات", callback_data='detailed_stats'),
-        types.InlineKeyboardButton("⚙️ الإعدادات العامة", callback_data='menu_settings')
+        btn("الإحصائيات التفصيلية", callback_data='detailed_stats', emoji_id=E['chart'], style="primary"),
+        btn("الإعدادات العامة", callback_data='menu_settings', emoji_id=E['settings'], style="success")
     )
     markup.add(
-        types.InlineKeyboardButton("📣 إرسال جماعي", callback_data='menu_broadcast'),
-        types.InlineKeyboardButton("🖼️ صورة ثابتة", callback_data='set_fixed_img')
+        btn("إرسال جماعي", callback_data='menu_broadcast', emoji_id=E['fire'], style="danger"),
+        btn("صورة ثابتة", callback_data='set_fixed_img', emoji_id=E['picture'], style="success")
     )
     markup.add(
-        types.InlineKeyboardButton("👨‍💻 تغيير المطور", callback_data='change_dev'),
-        types.InlineKeyboardButton("📡 تغيير السورس", callback_data='change_source')
+        btn("تغيير المطور", callback_data='change_dev', emoji_id=E['crown'], style="primary"),
+        btn("تغيير السورس", callback_data='change_source', emoji_id=E['python'], style="primary")
     )
     text = '> أهلاً بك في *لوحة تحكم الأدمن الشاملة*\\.\n> اختر القسم المطلوب للتحكم الكامل بالبوت\\.'
     if message_id:
@@ -219,9 +244,6 @@ def send_admin_panel(chat_id, message_id=None):
         except: bot.send_message(chat_id, text, reply_markup=markup)
     else: bot.send_message(chat_id, text, reply_markup=markup)
 
-# ==========================================
-# أوامر البوت
-# ==========================================
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.from_user.id
@@ -240,12 +262,11 @@ def start_cmd(message):
     if not check_sub(user_id):
         sub_chan = get_setting('sub_channel', '').replace('@', '')
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔔 اشترك بالقناة", url=f'https://t.me/{sub_chan}'))
+        markup.add(btn("اشترك بالقناة", url=f'https://t.me/{sub_chan}', emoji_id=E['bell'], style="primary"))
         bot.send_message(message.chat.id, '> اشترك بالقناة أولاً حتى تقدر تسيطر وتستخدم البوت براحتك\\.', reply_markup=markup)
         return
         
-    if is_admin(user_id): 
-        send_admin_panel(message.chat.id)
+    if is_admin(user_id): send_admin_panel(message.chat.id)
     else:
         markup = types.InlineKeyboardMarkup(row_width=2)
         dev_user = get_setting('dev_user', 'Telegram').replace('@', '')
@@ -254,38 +275,28 @@ def start_cmd(message):
         dev_url = f'https://t.me/{dev_user}' if not dev_user.startswith('http') else dev_user
         source_url = f'https://t.me/{source_chan}' if not source_chan.startswith('http') else source_chan
         target_url = f'https://t.me/{target_chan}' if not target_chan.startswith('http') else target_chan
-        
-        markup.add(types.InlineKeyboardButton("📸 دز صورة للتقييم", callback_data='user_send_pic'))
-        markup.add(types.InlineKeyboardButton("👤 حسابي", callback_data='my_stats'))
-        markup.add(types.InlineKeyboardButton("📷 قناة صوركم", url=target_url))
-        markup.add(
-            types.InlineKeyboardButton("👨‍💻 المطور", url=dev_url),
-            types.InlineKeyboardButton("📡 قناة السورس", url=source_url)
-        )
+        markup.add(btn("دز صورة للتقييم", callback_data='user_send_pic', emoji_id=E['picture'], style="success"))
+        markup.add(btn("حسابي", callback_data='my_stats', emoji_id=E['people'], style="primary"))
+        markup.add(btn("قناة صوركم", url=target_url, emoji_id=E['link'], style="danger"))
+        markup.add(btn("المطور", url=dev_url, emoji_id=E['crown'], style="primary"), btn("قناة السورس", url=source_url, emoji_id=E['python'], style="primary"))
         caption = '> هلا بيك ببوت تقييم الصور\\! دزلنا صورتك ونقيمها إلك وننشرها بالقناة الأحسن\\.'
         fixed_img = get_setting('fixed_image_id', '')
         if fixed_img: bot.send_photo(message.chat.id, fixed_img, caption=caption, reply_markup=markup)
         else: bot.send_message(message.chat.id, caption, reply_markup=markup)
 
-# ==========================================
-# معالج الأزرار (Callbacks)
-# ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
+    chat_id = call.message.chat.id; user_id = call.from_user.id
     
-    # أزرار المستخدم العادي
     if call.data == 'user_send_pic':
         bot.send_message(chat_id, '> دز الصورة مالتك حالياً حتى نبلش ونقيمها إلك\\.')
     elif call.data == 'my_stats':
         with db_lock:
             cursor.execute('SELECT photos_rated FROM users WHERE user_id=?', (user_id,))
-            row = cursor.fetchone()
-            count = row[0] if row else 0
+            row = cursor.fetchone(); count = row[0] if row else 0
         bot.answer_callback_query(call.id, f'عدد الصور التي قمت بتقييمها: {count}', show_alert=True)
     elif call.data == 'rate_click':
-        bot.answer_callback_query(call.id, 'شكراً لتقييمك للصورة! ⭐', show_alert=False)
+        bot.answer_callback_query(call.id, 'شكراً لتقييمك للصورة!', show_alert=False)
     elif call.data in ['gender_boy', 'gender_girl']:
         if user_id not in user_temp_photos:
             bot.send_message(chat_id, '> انتهت جلسة الصورة، يرجى إرسال الصورة من جديد\\.')
@@ -296,21 +307,18 @@ def callback_listener(call):
             return
             
         data = user_temp_photos.pop(user_id)
-        photo_id = data['photo_id']
-        caption = data.get('caption', '')
-        
+        photo_id = data['photo_id']; caption = data.get('caption', '')
         bot.send_chat_action(chat_id, 'typing')
         rating, sweet_words = get_ai_rating_and_comment(caption, call.data)
         
         if not rating or not sweet_words:
             rating = random.randint(7, 10)
-            sweet_words = random.choice(['صورة تخبل!', 'أناقة لا توصف!', 'طالع فد شيء!'])
-        else: 
-            rating = max(0, min(10, rating))
+            sweet_words = random.choice(BOY_TEXTS if call.data == 'gender_boy' else GIRL_TEXTS)
+        else: rating = max(0, min(10, rating))
             
         caption_text = f'> تقييم جديد وصل للقناة\n\n> الرأي: {escape_md(sweet_words)}\n> التقييم الإجمالي: {rating}/10'
         channel_markup = types.InlineKeyboardMarkup()
-        channel_markup.add(types.InlineKeyboardButton(f"⭐ التقييم: {rating}/10", callback_data='rate_click'))
+        channel_markup.add(btn(f"التقييم: {rating}/10", callback_data='rate_click', emoji_id=E['sparkles'], style="primary"))
         try:
             bot.send_photo(target_chan, photo_id, caption=caption_text, reply_markup=channel_markup)
             bot.edit_message_text('> عاشت إيدك، تم تقييم الصورة ونشرها بقناة التقييم بنجاح\\.', chat_id, call.message.message_id)
@@ -322,8 +330,6 @@ def callback_listener(call):
 
     # === أزرار الأدمن ===
     if is_admin(user_id):
-        bot.answer_callback_query(call.id) # إزالة علامة التحميل من الزر
-        
         if call.data == 'back_admin': send_admin_panel(chat_id, call.message.message_id)
         
         elif call.data == 'detailed_stats':
@@ -335,7 +341,7 @@ def callback_listener(call):
             stats_text = (
                 f'> 📊 *الإحصائيات التفصيلية*\n\n'
                 f'> 👥 إجمالي المستخدمين: `{total_users}`\n'
-                f'> 🚫 المحظورون: `{banned_users}`\n'
+                f'> 🚫 المستخدمون المحظورون: `{banned_users}`\n'
                 f'> ⚠️ محاولات إباحية مكتشفة: `{nsfw_attempts}`\n'
                 f'> 📸 إجمالي الصور المقيّمة: `{total_ratings}`\n'
             )
@@ -343,10 +349,10 @@ def callback_listener(call):
             
         elif call.data == 'menu_protection':
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("👁️ عرض المحظورين", callback_data='view_banned'))
-            markup.add(types.InlineKeyboardButton("✅ إلغاء حظر مستخدم", callback_data='unban_user_input'))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_admin'))
-            bot.edit_message_text('> 🛡️ *قسم الحماية والمحظورين*', chat_id, call.message.message_id, reply_markup=markup)
+            markup.add(btn("عرض المحظورين", callback_data='view_banned', emoji_id=E['people'], style="primary"))
+            markup.add(btn("إلغاء حظر مستخدم", callback_data='unban_user_input', emoji_id=E['check'], style="success"))
+            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+            bot.edit_message_text('> 🛡️ *قسم الحماية والمحظورين*\n> تحكم بالمستخدمين المحظورين تلقائياً.', chat_id, call.message.message_id, reply_markup=markup)
         elif call.data == 'view_banned':
             with db_lock:
                 cursor.execute("SELECT user_id, nsfw_warnings FROM users WHERE banned=1")
@@ -363,8 +369,8 @@ def callback_listener(call):
         elif call.data == 'menu_settings':
             maint_status = "مفعّل 🔴" if get_setting('maintenance_mode', '0') == '1' else "معطّل 🟢"
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(f"🔧 وضع الصيانة ({maint_status})", callback_data='toggle_maintenance'))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_admin'))
+            markup.add(btn(f"وضع الصيانة ({maint_status})", callback_data='toggle_maintenance', emoji_id=E['settings'], style="danger" if get_setting('maintenance_mode', '0') == '1' else "success"))
+            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
             bot.edit_message_text('> ⚙️ *الإعدادات العامة*', chat_id, call.message.message_id, reply_markup=markup)
         elif call.data == 'toggle_maintenance':
             current = get_setting('maintenance_mode', '0')
@@ -373,8 +379,8 @@ def callback_listener(call):
             
         elif call.data == 'menu_broadcast':
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("📣 إرسال رسالة الآن", callback_data='do_broadcast'))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_admin'))
+            markup.add(btn("إرسال رسالة الآن", callback_data='do_broadcast', emoji_id=E['fire'], style="danger"))
+            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
             bot.edit_message_text('> 📣 إرسال جماعي لكل المستخدمين:', chat_id, call.message.message_id, reply_markup=markup)
         elif call.data == 'do_broadcast':
             msg = bot.send_message(chat_id, '> دز الرسالة النصية ال تريدها أن توصل للجميع:')
@@ -389,9 +395,9 @@ def callback_listener(call):
             
         elif call.data == 'menu_channel':
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("➕ إضافة قناة", callback_data='add_target_chan'), types.InlineKeyboardButton("🗑️ حذف القناة", callback_data='del_target_chan'))
-            markup.add(types.InlineKeyboardButton("👁️ عرض القناة", callback_data='show_target_chan'))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_admin'))
+            markup.add(btn("إضافة قناة", callback_data='add_target_chan', emoji_id=E['check'], style="success"), btn("حذف القناة", callback_data='del_target_chan', emoji_id=E['cross'], style="danger"))
+            markup.add(btn("عرض القناة", callback_data='show_target_chan', emoji_id=E['link'], style="primary"))
+            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
             bot.edit_message_text('> خيارات إعداد قناة التقييم والنشر:', chat_id, call.message.message_id, reply_markup=markup)
         elif call.data == 'add_target_chan':
             msg = bot.send_message(chat_id, '> دز معرف أو أيدي القناة \\(مثال: @channel\\):')
@@ -400,33 +406,30 @@ def callback_listener(call):
             target = get_setting('target_channel', 'ما مضافة قناة لحد الان')
             bot.send_message(chat_id, f'> القناة الحالية للنشر: {escape_md(target)}')
         elif call.data == 'del_target_chan':
-            set_setting('target_channel', '')
-            bot.send_message(chat_id, '> تم حذف قناة التقييم بنجاح\\.')
+            set_setting('target_channel', ''); bot.send_message(chat_id, '> تم حذف قناة التقييم بنجاح\\.')
             
         elif call.data == 'menu_sub':
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("➕ إضافة قناة", callback_data='add_sub_chan'), types.InlineKeyboardButton("🗑️ حذف القناة", callback_data='del_sub_chan'))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_admin'))
+            markup.add(btn("إضافة قناة", callback_data='add_sub_chan', emoji_id=E['check'], style="success"), btn("حذف القناة", callback_data='del_sub_chan', emoji_id=E['cross'], style="danger"))
+            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
             bot.edit_message_text('> إعدادات قناة الاشتراك الإجباري:', chat_id, call.message.message_id, reply_markup=markup)
         elif call.data == 'add_sub_chan':
             msg = bot.send_message(chat_id, '> دز معرف قناة الاشتراك الإجباري \\(مثال: @channel\\):')
             bot.register_next_step_handler(msg, save_sub_channel)
         elif call.data == 'del_sub_chan':
-            set_setting('sub_channel', '')
-            bot.send_message(chat_id, '> تم إلغاء الاشتراك الإجباري\\.')
+            set_setting('sub_channel', ''); bot.send_message(chat_id, '> تم إلغاء الاشتراك الإجباري\\.')
             
         elif call.data == 'menu_admins':
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("➕ إضافة أدمن", callback_data='add_admin'), types.InlineKeyboardButton("👁️ عرض الأدمنية", callback_data='show_admins'))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_admin'))
+            markup.add(btn("إضافة أدمن", callback_data='add_admin', emoji_id=E['check'], style="success"), btn("عرض الأدمنية", callback_data='show_admins', emoji_id=E['people'], style="primary"))
+            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
             bot.edit_message_text('> قائمة خيارات إداري البوت:', chat_id, call.message.message_id, reply_markup=markup)
         elif call.data == 'add_admin':
             msg = bot.send_message(chat_id, '> دز أيدي \\(ID\\) الأدمن الجديد:')
             bot.register_next_step_handler(msg, save_new_admin)
         elif call.data == 'show_admins':
             with db_lock:
-                cursor.execute('SELECT user_id FROM admins')
-                admin_list = [str(r[0]) for r in cursor.fetchall()]
+                cursor.execute('SELECT user_id FROM admins'); admin_list = [str(r[0]) for r in cursor.fetchall()]
             bot.send_message(chat_id, '> قائمة الأدمنية:\n' + '\n'.join(admin_list))
         elif call.data == 'set_fixed_img':
             msg = bot.send_message(chat_id, '> دز الصورة الثابتة للترحيب بكل المستخدمين:')
@@ -451,8 +454,7 @@ def handle_user_photo(message):
     current_time = int(time.time())
     with db_lock:
         cursor.execute('SELECT last_photo_time FROM users WHERE user_id=?', (user_id,))
-        row = cursor.fetchone()
-        last_time = row[0] if row else 0
+        row = cursor.fetchone(); last_time = row[0] if row else 0
     if current_time - last_time < 30:
         bot.send_message(message.chat.id, f'> ⏱️ عد بعد {30 - (current_time - last_time)} ثانية حتى تقدر تدز صورة ثانية\\.')
         return
@@ -466,8 +468,7 @@ def handle_user_photo(message):
         with db_lock:
             cursor.execute('INSERT INTO nsfw_logs (user_id, photo_id, detected_at, method) VALUES (?, ?, ?, ?)', (user_id, photo_id, datetime.now().isoformat(), method))
             cursor.execute('SELECT nsfw_warnings FROM users WHERE user_id=?', (user_id,))
-            row = cursor.fetchone()
-            warnings = row[0] + 1 if row else 1
+            row = cursor.fetchone(); warnings = row[0] + 1 if row else 1
             
             if warnings >= 3:
                 cursor.execute('UPDATE users SET banned=1, nsfw_warnings=? WHERE user_id=?', (warnings, user_id))
@@ -491,10 +492,7 @@ def handle_user_photo(message):
         
     user_temp_photos[user_id] = {'photo_id': photo_id, 'caption': caption}
     markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👦 ولد", callback_data='gender_boy'),
-        types.InlineKeyboardButton("👧 بنت", callback_data='gender_girl')
-    )
+    markup.add(btn("ولد", callback_data='gender_boy', emoji_id=E['sparkles'], style="primary"), btn("بنت", callback_data='gender_girl', emoji_id=E['sparkles'], style="primary"))
     bot.send_message(message.chat.id, '> يرجى اختيار جنس صاحب الصورة للتقييم الصحيح:', reply_markup=markup)
 
 # ==========================================
@@ -513,8 +511,7 @@ def process_unban(message):
 def process_broadcast(message):
     sent = 0; failed = 0
     with db_lock:
-        cursor.execute('SELECT user_id FROM users')
-        users = cursor.fetchall()
+        cursor.execute('SELECT user_id FROM users'); users = cursor.fetchall()
     bot.send_message(message.chat.id, f'> جاري الإرسال لـ {len(users)} مستخدم\\.\\.\\.')
     for (uid,) in users:
         try: bot.send_message(uid, message.text); sent += 1; time.sleep(0.05)
@@ -536,17 +533,22 @@ def save_fixed_image(message):
     else: bot.send_message(message.chat.id, '> هذه مو صورة، يرجى إرسال صورة حصراً\\.')
 
 # ==========================================
-# نقطة التشغيل
+# نقطة التشغيل (حل مشكلة التعارض 409 Conflict)
 # ==========================================
-def run_bot(): 
-    bot.infinity_polling(timeout=30, long_polling_timeout=20)
+def run_bot():
+    while True:
+        try:
+            bot.infinity_polling(timeout=30, long_polling_timeout=20, skip_pending=True)
+        except Exception as e:
+            print(f"Bot Polling Error: {e}. Retrying in 10 seconds...")
+            time.sleep(10)
 
 if __name__ == "__main__":
-    # إدراج الأدمن الأساسي
-    with db_lock:
-        cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPER_ADMIN,))
-        conn.commit()
-        
+    # تشغيل خادم Flask في Thread منفصل
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)).start()
+    
+    # تشغيل المنبه (Keep-Alive)
     if APP_URL: threading.Thread(target=keep_alive_ping, daemon=True).start()
+    
+    # تشغيل البوت
     run_bot()
