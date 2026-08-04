@@ -35,6 +35,12 @@ bot = telebot.TeleBot(API_TOKEN, parse_mode='MarkdownV2')
 user_temp_photos = {}
 
 # ==========================================
+# النصوص الافتراضية (تمت إضافتها لحل مشكلة التوقف)
+# ==========================================
+BOY_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبل وماكو منها.', 'ذوقك كلش راقي، كادر وإضاءة فد شيء روعة.', 'فد شيء على العقل! الجمال والترتيب بجهة وهالصورة بجهة.', 'طالع ملكي ونظرة تاخذ العقل، إبداع بلا حدود.', 'كلش حلو الصورة، طالع أنيق ومرتب.']
+GIRL_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبلين فيها وماكو منها.', 'ذوقج كلش راقي، طالعة فد شيء روعة ومميزة.', 'فد شيء على العقل! الجمال والترتيب بجهة وهالصورة بجهة.', 'طالعة ملكية ونظرة تاخذ العقل، إبداع بلا حدود.', 'كلش حلوة الصورة، تخبلين وطالعة تجننين.']
+
+# ==========================================
 # خادم Flask والمنبه (Keep-Alive)
 # ==========================================
 app = Flask(__name__)
@@ -214,7 +220,7 @@ def get_ai_rating_and_comment(caption, gender):
     return None, None
 
 # ==========================================
-# لوحة تحكم الأدمن الشاملة (المرجعة والمطورة)
+# لوحة تحكم الأدمن الشاملة
 # ==========================================
 def send_admin_panel(chat_id, message_id=None):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -244,6 +250,9 @@ def send_admin_panel(chat_id, message_id=None):
         except: bot.send_message(chat_id, text, reply_markup=markup)
     else: bot.send_message(chat_id, text, reply_markup=markup)
 
+# ==========================================
+# أوامر البوت
+# ==========================================
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.from_user.id
@@ -266,7 +275,8 @@ def start_cmd(message):
         bot.send_message(message.chat.id, '> اشترك بالقناة أولاً حتى تقدر تسيطر وتستخدم البوت براحتك\\.', reply_markup=markup)
         return
         
-    if is_admin(user_id): send_admin_panel(message.chat.id)
+    if is_admin(user_id): 
+        send_admin_panel(message.chat.id)
     else:
         markup = types.InlineKeyboardMarkup(row_width=2)
         dev_user = get_setting('dev_user', 'Telegram').replace('@', '')
@@ -284,10 +294,14 @@ def start_cmd(message):
         if fixed_img: bot.send_photo(message.chat.id, fixed_img, caption=caption, reply_markup=markup)
         else: bot.send_message(message.chat.id, caption, reply_markup=markup)
 
+# ==========================================
+# معالج الأزرار (Callbacks)
+# ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
     chat_id = call.message.chat.id; user_id = call.from_user.id
     
+    # أزرار المستخدم العادي
     if call.data == 'user_send_pic':
         bot.send_message(chat_id, '> دز الصورة مالتك حالياً حتى نبلش ونقيمها إلك\\.')
     elif call.data == 'my_stats':
@@ -328,8 +342,10 @@ def callback_listener(call):
         except Exception as e:
             bot.send_message(chat_id, f'> صار خطأ بالنشر، تأكد البوت أدمن بالقناة\\.\nالخطأ: {escape_md(str(e))}')
 
-    # === لوحة الأدمن ===
+    # === أزرار الأدمن ===
     if is_admin(user_id):
+        bot.answer_callback_query(call.id) # إزالة علامة التحميل من الزر
+        
         if call.data == 'back_admin': send_admin_panel(chat_id, call.message.message_id)
         
         elif call.data == 'detailed_stats':
