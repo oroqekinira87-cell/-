@@ -15,24 +15,12 @@ import re
 # قاموس الإيموجيات المميزة (Premium Custom Emojis)
 # ==========================================
 E = {
-    'fire': '5424972470023104089',
-    'check': '5206607081334906820',
-    'sparkles': '5325547803936572038',
-    'gem': '5427168083074628963',
-    'pencil': '5395444784611480792',
-    'settings': '5341715473882955310',
-    'crown': '5217822164362739968',
-    'chart': '5231200819986047254',
-    'warning': '5447644880824181073',
-    'trophy': '5188344996356448758',
-    'people': '5258513401784573443',
-    'link': '5271604874419647061',
-    'picture': '5375074927252621134',
-    'arrow': '5416117059207572332',
-    'cross': '5210952531676504517',
-    'bulb': '5422439311196834318',
-    'bell': '5458603043203327669',
-    'python': '5260480440971570446',
+    'fire': '5424972470023104089', 'check': '5206607081334906820', 'sparkles': '5325547803936572038',
+    'gem': '5427168083074628963', 'pencil': '5395444784611480792', 'settings': '5341715473882955310',
+    'crown': '5217822164362739968', 'chart': '5231200819986047254', 'warning': '5447644880824181073',
+    'trophy': '5188344996356448758', 'people': '5258513401784573443', 'link': '5271604874419647061',
+    'picture': '5375074927252621134', 'arrow': '5416117059207572332', 'cross': '5210952531676504517',
+    'bulb': '5422439311196834318', 'bell': '5458603043203327669', 'python': '5260480440971570446',
 }
 
 # ==========================================
@@ -52,20 +40,16 @@ user_temp_photos = {}
 app = Flask(__name__)
 
 @app.route('/')
-def home():
-    return jsonify({"status": "running", "bot": "Photo Rating Bot"})
+def home(): return jsonify({"status": "running", "bot": "Photo Rating Bot"})
 
 @app.route('/health')
-def health():
-    return jsonify({"status": "ok"}), 200
+def health(): return jsonify({"status": "ok"}), 200
 
 def keep_alive_ping():
     while True:
         try:
-            if APP_URL:
-                requests.get(f'{APP_URL}/health', timeout=15)
-        except:
-            pass
+            if APP_URL: requests.get(f'{APP_URL}/health', timeout=15)
+        except: pass
         time.sleep(300)
 
 # ==========================================
@@ -79,23 +63,17 @@ cursor.executescript('''
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    photos_rated INTEGER DEFAULT 0,
-    last_photo_time INTEGER DEFAULT 0,
-    nsfw_warnings INTEGER DEFAULT 0,
-    banned INTEGER DEFAULT 0
+    user_id INTEGER PRIMARY KEY, photos_rated INTEGER DEFAULT 0,
+    last_photo_time INTEGER DEFAULT 0, nsfw_warnings INTEGER DEFAULT 0, banned INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS nsfw_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER, photo_id TEXT, detected_at TEXT, method TEXT
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, photo_id TEXT, detected_at TEXT, method TEXT
 );
 ''')
 
 columns_to_add = [
-    ("photos_rated", "INTEGER DEFAULT 0"),
-    ("last_photo_time", "INTEGER DEFAULT 0"),
-    ("nsfw_warnings", "INTEGER DEFAULT 0"),
-    ("banned", "INTEGER DEFAULT 0")
+    ("photos_rated", "INTEGER DEFAULT 0"), ("last_photo_time", "INTEGER DEFAULT 0"),
+    ("nsfw_warnings", "INTEGER DEFAULT 0"), ("banned", "INTEGER DEFAULT 0")
 ]
 for col_name, col_type in columns_to_add:
     try: cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type};")
@@ -119,8 +97,7 @@ def set_setting(key, value):
 
 def escape_md(text):
     special_chars = '_*[]()~`>#+-=|{}.!'
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
+    for char in special_chars: text = text.replace(char, f'\\{char}')
     return text
 
 def is_admin(user_id):
@@ -159,19 +136,12 @@ def btn(text, callback_data=None, url=None, emoji_id=None, style="primary"):
 # نظام الذكاء الاصطناعي (حماية فائقة المشدد + التقييم)
 # ==========================================
 def analyze_photo(photo_file_id):
-    """
-    فحص الصورة بدقة عبر الذكاء الاصطناعي (3 طبقات حماية):
-    1. نموذج NSFW حساسيته عالية جداً.
-    2. وصف الصورة لمنع (البكيني، الملابس الداخلية، شبه العاري، الإيحاء).
-    3. فحص لون البشرة الاحتياطي.
-    """
     try:
         file_info = bot.get_file(photo_file_id)
         downloaded = bot.download_file(file_info.file_path)
-    except:
-        return False, 'download_error', None
+    except: return False, 'download_error', None
 
-    # 1. فحص الإباحية الصارم جداً (HuggingFace NSFW Model)
+    # 1. فحص الإباحية الصارم جداً
     try:
         api_url = "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection"
         for attempt in range(3):
@@ -179,15 +149,13 @@ def analyze_photo(photo_file_id):
             if response.status_code == 200:
                 result = response.json()
                 for item in result:
-                    # عتبة صارمة جداً: أي نسبة إباحية فوق 15% يتم حظرها فوراً
                     if item.get('label', '').lower() == 'nsfw' and item.get('score', 0) > 0.15:
                         return True, 'AI_Nsfw_Classifier', None
                 break
-            elif response.status_code == 503:
-                time.sleep(5) # انتظار تحميل النموذج
+            elif response.status_code == 503: time.sleep(5)
     except: pass
 
-    # 2. توليد وصف للصورة لفحص الإيحاءات والمحارم (BLIP Model)
+    # 2. توليد وصف للصورة لفحص الإيحاءات
     caption = None
     try:
         api_url_blip = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
@@ -196,25 +164,22 @@ def analyze_photo(photo_file_id):
             if response.status_code == 200:
                 caption = response.json()[0].get('generated_text', '')
                 break
-            elif response.status_code == 503:
-                time.sleep(5)
+            elif response.status_code == 503: time.sleep(5)
     except: pass
 
-    # 3. فحص النص للإيحاءات والإيماءات (حظر البكيني والداخلية والمخالفات)
+    # 3. فحص النص للإيحاءات والإيماءات
     if caption:
-        # قائمة كلمات صارمة جداً لمنع شبه العارية
         nsfw_keywords = [
             "naked", "nude", "nudity", "bikini", "swimwear", "underwear", "bra", "panties", 
             "lingerie", "cleavage", "topless", "bottomless", "thong", "erotic", "sexy", 
             "undressed", "revealing", "midriff", "bare skin", "bare chest", "breasts", 
-            "butt", "buttocks", "boobs", "pussy", "dick", "penis", "vagina", "cleavage"
+            "butt", "buttocks", "boobs", "pussy", "dick", "penis", "vagina"
         ]
         caption_lower = caption.lower()
         for word in nsfw_keywords:
-            if word in caption_lower:
-                return True, 'AI_Keyword_Strict_Check', caption
+            if word in caption_lower: return True, 'AI_Keyword_Strict_Check', caption
     else:
-        # 4. فحص احتياطي للون البشرة (إذا فشلت APIs الذكاء الاصطناعي)
+        # 4. فحص احتياطي للون البشرة
         try:
             from PIL import Image
             img = Image.open(BytesIO(downloaded)).convert('RGB')
@@ -224,7 +189,6 @@ def analyze_photo(photo_file_id):
                 total_pixels += 1
                 if r > 95 and g > 40 and b > 20 and max(r, g, b) - min(r, g, b) > 15 and abs(r - g) > 15 and r > g and r > b:
                     skin_pixels += 1
-            # إذا كانت نسبة الجلد المكشوف فوق 30%، يتم الحظر (تكون فعالة جداً لشبه العاري)
             if (skin_pixels / total_pixels if total_pixels > 0 else 0) > 0.30:
                 return True, 'Skin_Tone_Fallback', None
         except: pass
@@ -232,33 +196,25 @@ def analyze_photo(photo_file_id):
     return False, 'Safe', caption
 
 def get_ai_rating_and_comment(caption, gender):
-    """
-    يطلب من الذكاء الاصطناعي كتابة تعليق عراقي يعتمد على وصف الصورة وإعطاء تقييم من 0 إلى 10
-    """
     if not caption: caption = "a person"
     gender_word = "man" if gender == 'gender_boy' else "woman"
-    
     try:
         prompt = f"You are an expert photo rater. The image shows: {caption}. The person is a {gender_word}. Give a rating from 0 to 10 and a short, sweet compliment in Iraqi Arabic dialect. Format exactly as: Rating: X/10 | Comment: Y"
         encoded_prompt = requests.utils.quote(prompt)
         response = requests.get(f"https://text.pollinations.ai/{encoded_prompt}", timeout=20)
-        
         if response.status_code == 200:
             text = response.text
             match = re.search(r'(\d+)\s*/\s*10\s*\|\s*(.*)', text, re.IGNORECASE)
             if match:
-                rating = int(match.group(1))
-                comment = match.group(2).replace('*', '').strip()
+                rating = int(match.group(1)); comment = match.group(2).replace('*', '').strip()
                 return rating, comment
             match = re.search(r'(\d+)\s*/\s*10', text, re.IGNORECASE)
-            if match:
-                return int(match.group(1)), text
+            if match: return int(match.group(1)), text
     except: pass
-    
     return None, None
 
 # ==========================================
-# لوحة تحكم الأدمن
+# لوحة تحكم الأدمن الشاملة (المرجعة والمطورة)
 # ==========================================
 def send_admin_panel(chat_id, message_id=None):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -268,17 +224,21 @@ def send_admin_panel(chat_id, message_id=None):
     )
     markup.add(
         btn("الأدمنية", callback_data='menu_admins', emoji_id=E['people'], style="primary"),
-        btn("الإحصائيات", callback_data='stats', emoji_id=E['chart'], style="danger")
+        btn("الحماية والمحظورين", callback_data='menu_protection', emoji_id=E['warning'], style="danger")
     )
     markup.add(
-        btn("تغيير المطور", callback_data='change_dev', emoji_id=E['crown'], style="success"),
-        btn("تغيير السورس", callback_data='change_source', emoji_id=E['python'], style="success")
+        btn("الإحصائيات التفصيلية", callback_data='detailed_stats', emoji_id=E['chart'], style="primary"),
+        btn("الإعدادات العامة", callback_data='menu_settings', emoji_id=E['settings'], style="success")
     )
     markup.add(
-        btn("صورة ثابتة", callback_data='set_fixed_img', emoji_id=E['picture'], style="success"),
-        btn("إرسال جماعي", callback_data='menu_broadcast', emoji_id=E['fire'], style="danger")
+        btn("إرسال جماعي", callback_data='menu_broadcast', emoji_id=E['fire'], style="danger"),
+        btn("صورة ثابتة", callback_data='set_fixed_img', emoji_id=E['picture'], style="success")
     )
-    text = '> أهلاً بك ولوحة تحكم الأدمن الخاصة بالبوت جاهزة للتحكم الكامل\\.'
+    markup.add(
+        btn("تغيير المطور", callback_data='change_dev', emoji_id=E['crown'], style="primary"),
+        btn("تغيير السورس", callback_data='change_source', emoji_id=E['python'], style="primary")
+    )
+    text = '> أهلاً بك في *لوحة تحكم الأدمن الشاملة*\\.\n> اختر القسم المطلوب للتحكم الكامل بالبوت\\.'
     if message_id:
         try: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
         except: bot.send_message(chat_id, text, reply_markup=markup)
@@ -290,15 +250,22 @@ def start_cmd(message):
     with db_lock:
         cursor.execute('INSERT OR IGNORE INTO users (user_id, photos_rated, last_photo_time, nsfw_warnings, banned) VALUES (?, 0, 0, 0, 0)', (user_id,))
         conn.commit()
+    
     if is_banned(user_id):
         bot.send_message(message.chat.id, '> 🚫 تم حظر حسابك من استخدام البوت بسبب إرسال محتوى غير لائق\\.')
         return
+        
+    if not is_admin(user_id) and get_setting('maintenance_mode', '0') == '1':
+        bot.send_message(message.chat.id, '> 🔧 البوت حالياً تحت الصيانة\\.\n> سنرجع قريباً بإذن الله\\.')
+        return
+        
     if not check_sub(user_id):
         sub_chan = get_setting('sub_channel', '').replace('@', '')
         markup = types.InlineKeyboardMarkup()
         markup.add(btn("اشترك بالقناة", url=f'https://t.me/{sub_chan}', emoji_id=E['bell'], style="primary"))
         bot.send_message(message.chat.id, '> اشترك بالقناة أولاً حتى تقدر تسيطر وتستخدم البوت براحتك\\.', reply_markup=markup)
         return
+        
     if is_admin(user_id): send_admin_panel(message.chat.id)
     else:
         markup = types.InlineKeyboardMarkup(row_width=2)
@@ -320,6 +287,7 @@ def start_cmd(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
     chat_id = call.message.chat.id; user_id = call.from_user.id
+    
     if call.data == 'user_send_pic':
         bot.send_message(chat_id, '> دز الصورة مالتك حالياً حتى نبلش ونقيمها إلك\\.')
     elif call.data == 'my_stats':
@@ -340,15 +308,13 @@ def callback_listener(call):
             
         data = user_temp_photos.pop(user_id)
         photo_id = data['photo_id']; caption = data.get('caption', '')
-        
         bot.send_chat_action(chat_id, 'typing')
         rating, sweet_words = get_ai_rating_and_comment(caption, call.data)
         
         if not rating or not sweet_words:
             rating = random.randint(7, 10)
             sweet_words = random.choice(BOY_TEXTS if call.data == 'gender_boy' else GIRL_TEXTS)
-        else:
-            rating = max(0, min(10, rating))
+        else: rating = max(0, min(10, rating))
             
         caption_text = f'> تقييم جديد وصل للقناة\n\n> الرأي: {escape_md(sweet_words)}\n> التقييم الإجمالي: {rating}/10'
         channel_markup = types.InlineKeyboardMarkup()
@@ -362,11 +328,56 @@ def callback_listener(call):
         except Exception as e:
             bot.send_message(chat_id, f'> صار خطأ بالنشر، تأكد البوت أدمن بالقناة\\.\nالخطأ: {escape_md(str(e))}')
 
+    # === لوحة الأدمن ===
     if is_admin(user_id):
-        if call.data == 'stats':
+        if call.data == 'back_admin': send_admin_panel(chat_id, call.message.message_id)
+        
+        elif call.data == 'detailed_stats':
             with db_lock:
-                cursor.execute('SELECT COUNT(*) FROM users'); count = cursor.fetchone()[0]
-            bot.answer_callback_query(call.id, f'عدد مستخدمين البوت: {count}', show_alert=True)
+                cursor.execute("SELECT COUNT(*) FROM users"); total_users = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM users WHERE banned=1"); banned_users = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM nsfw_logs"); nsfw_attempts = cursor.fetchone()[0]
+                cursor.execute("SELECT SUM(photos_rated) FROM users"); total_ratings = cursor.fetchone()[0] or 0
+            stats_text = (
+                f'> 📊 *الإحصائيات التفصيلية*\n\n'
+                f'> 👥 إجمالي المستخدمين: `{total_users}`\n'
+                f'> 🚫 المستخدمون المحظورون: `{banned_users}`\n'
+                f'> ⚠️ محاولات إباحية مكتشفة: `{nsfw_attempts}`\n'
+                f'> 📸 إجمالي الصور المقيّمة: `{total_ratings}`\n'
+            )
+            bot.edit_message_text(stats_text, chat_id, call.message.message_id)
+            
+        elif call.data == 'menu_protection':
+            markup = types.InlineKeyboardMarkup()
+            markup.add(btn("عرض المحظورين", callback_data='view_banned', emoji_id=E['people'], style="primary"))
+            markup.add(btn("إلغاء حظر مستخدم", callback_data='unban_user_input', emoji_id=E['check'], style="success"))
+            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+            bot.edit_message_text('> 🛡️ *قسم الحماية والمحظورين*\n> تحكم بالمستخدمين المحظورين تلقائياً.', chat_id, call.message.message_id, reply_markup=markup)
+        elif call.data == 'view_banned':
+            with db_lock:
+                cursor.execute("SELECT user_id, nsfw_warnings FROM users WHERE banned=1")
+                banned_list = cursor.fetchall()
+            if banned_list:
+                text = '> 🚫 *قائمة المحظورين:*\n\n'
+                for b in banned_list: text += f'> ID: `{b[0]}` \\| التحذيرات: {b[1]}\n'
+            else: text = '> ✅ لا يوجد مستخدمون محظورون حالياً\\.'
+            bot.send_message(chat_id, text)
+        elif call.data == 'unban_user_input':
+            msg = bot.send_message(chat_id, '> دز أيدي \\(ID\\) المستخدم لإلغاء حظره:')
+            bot.register_next_step_handler(msg, process_unban)
+            
+        elif call.data == 'menu_settings':
+            maint_status = "مفعّل 🔴" if get_setting('maintenance_mode', '0') == '1' else "معطّل 🟢"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(btn(f"وضع الصيانة ({maint_status})", callback_data='toggle_maintenance', emoji_id=E['settings'], style="danger" if get_setting('maintenance_mode', '0') == '1' else "success"))
+            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+            bot.edit_message_text('> ⚙️ *الإعدادات العامة*', chat_id, call.message.message_id, reply_markup=markup)
+        elif call.data == 'toggle_maintenance':
+            current = get_setting('maintenance_mode', '0')
+            new_val = '1' if current == '0' else '0'
+            set_setting('maintenance_mode', new_val)
+            send_admin_panel(chat_id, call.message.message_id)
+            
         elif call.data == 'menu_broadcast':
             markup = types.InlineKeyboardMarkup()
             markup.add(btn("إرسال رسالة الآن", callback_data='do_broadcast', emoji_id=E['fire'], style="danger"))
@@ -375,13 +386,14 @@ def callback_listener(call):
         elif call.data == 'do_broadcast':
             msg = bot.send_message(chat_id, '> دز الرسالة النصية ال تريدها أن توصل للجميع:')
             bot.register_next_step_handler(msg, process_broadcast)
-        elif call.data == 'back_admin': send_admin_panel(chat_id, call.message.message_id)
+            
         elif call.data == 'change_dev':
             msg = bot.send_message(chat_id, '> دز معرف المطور الجديد \\(مثال: @username\\):')
             bot.register_next_step_handler(msg, save_dev)
         elif call.data == 'change_source':
             msg = bot.send_message(chat_id, '> دز رابط أو معرف قناة السورس الجديدة:')
             bot.register_next_step_handler(msg, save_source)
+            
         elif call.data == 'menu_channel':
             markup = types.InlineKeyboardMarkup()
             markup.add(btn("إضافة قناة", callback_data='add_target_chan', emoji_id=E['check'], style="success"), btn("حذف القناة", callback_data='del_target_chan', emoji_id=E['cross'], style="danger"))
@@ -396,6 +408,7 @@ def callback_listener(call):
             bot.send_message(chat_id, f'> القناة الحالية للنشر: {escape_md(target)}')
         elif call.data == 'del_target_chan':
             set_setting('target_channel', ''); bot.send_message(chat_id, '> تم حذف قناة التقييم بنجاح\\.')
+            
         elif call.data == 'menu_sub':
             markup = types.InlineKeyboardMarkup()
             markup.add(btn("إضافة قناة", callback_data='add_sub_chan', emoji_id=E['check'], style="success"), btn("حذف القناة", callback_data='del_sub_chan', emoji_id=E['cross'], style="danger"))
@@ -406,6 +419,7 @@ def callback_listener(call):
             bot.register_next_step_handler(msg, save_sub_channel)
         elif call.data == 'del_sub_chan':
             set_setting('sub_channel', ''); bot.send_message(chat_id, '> تم إلغاء الاشتراك الإجباري\\.')
+            
         elif call.data == 'menu_admins':
             markup = types.InlineKeyboardMarkup()
             markup.add(btn("إضافة أدمن", callback_data='add_admin', emoji_id=E['check'], style="success"), btn("عرض الأدمنية", callback_data='show_admins', emoji_id=E['people'], style="primary"))
@@ -431,6 +445,9 @@ def handle_user_photo(message):
     if is_banned(user_id):
         bot.send_message(message.chat.id, '> 🚫 تم حظر حسابك من استخدام البوت\\.')
         return
+    if not is_admin(user_id) and get_setting('maintenance_mode', '0') == '1':
+        bot.send_message(message.chat.id, '> 🔧 البوت تحت الصيانة حالياً\\.')
+        return
     if not check_sub(user_id):
         bot.send_message(message.chat.id, '> اشترك بالقناة أولاً حتى تقدر تدز صور للتقييم\\.')
         return
@@ -446,7 +463,6 @@ def handle_user_photo(message):
     photo_id = message.photo[-1].file_id
     bot.send_chat_action(message.chat.id, 'typing')
     
-    # الفحص المشدد بالذكاء الاصطناعي (قبل أي شيء)
     nsfw_detected, method, caption = analyze_photo(photo_id)
     
     if nsfw_detected:
@@ -483,6 +499,16 @@ def handle_user_photo(message):
 # ==========================================
 # دوال الحفظ والمعالجة
 # ==========================================
+def process_unban(message):
+    try:
+        target_id = int(message.text)
+        with db_lock:
+            cursor.execute('UPDATE users SET banned=0, nsfw_warnings=0 WHERE user_id=?', (target_id,))
+            conn.commit()
+        bot.send_message(message.chat.id, f'> ✅ تم إلغاء حظر المستخدم `{target_id}` وتصفير تحذيراته\\.')
+    except:
+        bot.send_message(message.chat.id, '> ⚠️ الأيدي غير صحيح\\.')
+
 def process_broadcast(message):
     sent = 0; failed = 0
     with db_lock:
