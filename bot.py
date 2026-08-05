@@ -10,6 +10,20 @@ from flask import Flask, jsonify
 from datetime import datetime, date
 from io import BytesIO
 import re
+import logging
+
+# ==========================================
+# إعداد الـ Logging الاحترافي
+# ==========================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # قاموس الإيموجيات المميزة (Premium Custom Emojis)
@@ -52,72 +66,91 @@ def keep_alive_ping():
         try:
             if APP_URL:
                 requests.get(f'{APP_URL}/health', timeout=15)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Keep-alive ping failed: {e}")
         time.sleep(300)
 
 # ==========================================
-# قاعدة البيانات
+# قاعدة البيانات (آمنة للـ Threading مع RLock)
 # ==========================================
 conn = sqlite3.connect('bot_data.db', check_same_thread=False)
 cursor = conn.cursor()
-db_lock = threading.Lock()
+db_lock = threading.RLock() # Reentrant Lock لمنع Deadlocks
 
-cursor.executescript('''
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY, photos_rated INTEGER DEFAULT 0,
-    last_photo_time INTEGER DEFAULT 0, nsfw_warnings INTEGER DEFAULT 0, banned INTEGER DEFAULT 0,
-    daily_count INTEGER DEFAULT 0, last_submit_date TEXT
-);
-CREATE TABLE IF NOT EXISTS nsfw_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, photo_id TEXT, detected_at TEXT, method TEXT
-);
-''')
+try:
+    cursor.executescript('''
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY, photos_rated INTEGER DEFAULT 0,
+        last_photo_time INTEGER DEFAULT 0, nsfw_warnings INTEGER DEFAULT 0, banned INTEGER DEFAULT 0,
+        daily_count INTEGER DEFAULT 0, last_submit_date TEXT
+    );
+    CREATE TABLE IF NOT EXISTS nsfw_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, photo_id TEXT, detected_at TEXT, method TEXT
+    );
+    ''')
 
-columns_to_add = [
-    ("photos_rated", "INTEGER DEFAULT 0"), ("last_photo_time", "INTEGER DEFAULT 0"),
-    ("nsfw_warnings", "INTEGER DEFAULT 0"), ("banned", "INTEGER DEFAULT 0"),
-    ("daily_count", "INTEGER DEFAULT 0"), ("last_submit_date", "TEXT")
-]
-for col_name, col_type in columns_to_add:
-    try: cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type};")
-    except sqlite3.OperationalError: pass
+    columns_to_add = [
+        ("photos_rated", "INTEGER DEFAULT 0"), ("last_photo_time", "INTEGER DEFAULT 0"),
+        ("nsfw_warnings", "INTEGER DEFAULT 0"), ("banned", "INTEGER DEFAULT 0"),
+        ("daily_count", "INTEGER DEFAULT 0"), ("last_submit_date", "TEXT")
+    ]
+    for col_name, col_type in columns_to_add:
+        try: 
+            cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type};")
+        except sqlite3.OperationalError: 
+            pass # العمود موجود بالفعل
 
-conn.commit()
+    conn.commit()
+except Exception as e:
+    logger.exception(f"Database initialization error: {e}")
 
 # ==========================================
 # الدوال المساعدة
 # ==========================================
 def get_setting(key, default=''):
     with db_lock:
-        cursor.execute('SELECT value FROM settings WHERE key=?', (key,))
-        row = cursor.fetchone()
-        return row[0] if row else default
+        try:
+            cursor.execute('SELECT value FROM settings WHERE key=?', (key,))
+            row = cursor.fetchone()
+            return row[0] if row else default
+        except Exception as e:
+            logger.error(f"Error in get_setting: {e}")
+            return default
 
 def set_setting(key, value):
     with db_lock:
-        cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, str(value)))
-        conn.commit()
+        try:
+            cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, str(value)))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error in set_setting: {e}")
 
 def escape_md(text):
     if not text: return ""
-    # حل مشكلة الانهيار: تخطي الرموز الخاصة بالكامل
+    if not isinstance(text, str): text = str(text)
     special_chars = '_*[]()~`>#+-=|{}.!'
-    for char in special_chars: text = text.replace(char, f'\\{char}')
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
     return text
 
 def is_admin(user_id):
     with db_lock:
-        cursor.execute('SELECT user_id FROM admins WHERE user_id=?', (user_id,))
-        return cursor.fetchone() is not None
+        try:
+            cursor.execute('SELECT user_id FROM admins WHERE user_id=?', (user_id,))
+            return cursor.fetchone() is not None
+        except Exception:
+            return False
 
 def is_banned(user_id):
     with db_lock:
-        cursor.execute('SELECT banned FROM users WHERE user_id=?', (user_id,))
-        row = cursor.fetchone()
-        return row[0] == 1 if row else False
+        try:
+            cursor.execute('SELECT banned FROM users WHERE user_id=?', (user_id,))
+            row = cursor.fetchone()
+            return row[0] == 1 if row else False
+        except Exception:
+            return False
 
 def check_sub(user_id):
     sub_chan = get_setting('sub_channel', '')
@@ -125,7 +158,8 @@ def check_sub(user_id):
     try:
         member = bot.get_chat_member(sub_chan, user_id)
         return member.status in ['creator', 'administrator', 'member']
-    except: return True
+    except Exception:
+        return True
 
 def btn(text, callback_data=None, url=None, emoji_id=None, style="primary"):
     button_kwargs = {'text': text}
@@ -135,15 +169,25 @@ def btn(text, callback_data=None, url=None, emoji_id=None, style="primary"):
     if style: button_kwargs['style'] = style
     return types.InlineKeyboardButton(**button_kwargs)
 
+def safe_edit_message_text(chat_id, message_id, text, reply_markup=None):
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=reply_markup)
+    except Exception as e:
+        if "message is not modified" not in str(e).lower():
+            logger.warning(f"Failed to edit message {message_id}: {e}")
+
 # ==========================================
-# نظام الذكاء الاصطناعي (آمن ضد الانهيار)
+# نظام الذكاء الاصطناعي (آمن ضد الانهيار تماماً)
 # ==========================================
 def analyze_and_rate_photo(photo_file_id):
     try:
         file_info = bot.get_file(photo_file_id)
         downloaded = bot.download_file(file_info.file_path)
-    except: 
-        return False, 'Safe', random.randint(5, 8), "تعذر تحليل الصورة بالكامل، لكنها آمنة."
+        if not downloaded:
+            return False, 'Safe', random.randint(5, 8), "تعذر تحميل الصورة، تقييم افتراضي."
+    except Exception as e:
+        logger.error(f"Telegram file download failed: {e}")
+        return False, 'Safe', random.randint(5, 8), "تعذر تحليل الصورة، لكنها آمنة."
 
     # 1. رفع الصورة للحصول على رابط مباشر (Catbox)
     image_url = None
@@ -153,7 +197,8 @@ def analyze_and_rate_photo(photo_file_id):
         res = requests.post("https://catbox.moe/user/api.php", files=files, data=data, timeout=30)
         if res.status_code == 200 and res.text.startswith('http'):
             image_url = res.text.strip()
-    except: pass
+    except Exception as e:
+        logger.warning(f"Catbox upload failed: {e}")
 
     # 2. تحليل الصورة بالذكاء الاصطناعي (Pollinations Vision)
     if image_url:
@@ -174,16 +219,21 @@ def analyze_and_rate_photo(photo_file_id):
             response = requests.post("https://api.pollinations.ai/openai", json=payload, timeout=60)
             if response.status_code == 200:
                 data = response.json()
-                if 'choices' in data and len(data['choices']) > 0:
-                    text = data['choices'][0]['message']['content']
-                    if "nsfw" in text.lower():
-                        return True, "AI_Vision_NSFW", 0, "محتوى غير لائق"
-                    
-                    match = re.search(r'(\d+)\s*/\s*10', text)
-                    rating = int(match.group(1)) if match else random.randint(4, 8)
-                    rating = max(0, min(10, rating))
-                    return False, "Safe", rating, text
-        except: pass
+                # استخدام سلسلة get آمنة لمنع KeyError
+                choices = data.get('choices', [])
+                if choices:
+                    message_obj = choices[0].get('message', {})
+                    text = message_obj.get('content', '')
+                    if text:
+                        if "nsfw" in text.lower():
+                            return True, "AI_Vision_NSFW", 0, "محتوى غير لائق"
+                        
+                        match = re.search(r'(\d+)\s*/\s*10', text)
+                        rating = int(match.group(1)) if match else random.randint(4, 8)
+                        rating = max(0, min(10, rating))
+                        return False, "Safe", rating, text
+        except Exception as e:
+            logger.warning(f"Pollinations AI failed: {e}")
 
     # 3. النظام الاحتياطي
     return fallback_nsfw_check(downloaded)
@@ -192,10 +242,13 @@ def fallback_nsfw_check(downloaded):
     try:
         response = requests.post("https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection", data=downloaded, timeout=20)
         if response.status_code == 200:
-            for item in response.json():
-                if item.get('label', '').lower() == 'nsfw' and item.get('score', 0) > 0.15:
-                    return True, 'AI_Nsfw_Classifier', 0, "محتوى غير لائق"
-    except: pass
+            result = response.json()
+            if isinstance(result, list):
+                for item in result:
+                    if item.get('label', '').lower() == 'nsfw' and item.get('score', 0) > 0.15:
+                        return True, 'AI_Nsfw_Classifier', 0, "محتوى غير لائق"
+    except Exception as e:
+        logger.warning(f"HuggingFace AI failed: {e}")
 
     try:
         from PIL import Image
@@ -208,7 +261,8 @@ def fallback_nsfw_check(downloaded):
                 skin_pixels += 1
         if (skin_pixels / total_pixels if total_pixels > 0 else 0) > 0.30:
             return True, 'Skin_Tone_Fallback', 0, "محتوى غير لائق"
-    except: pass
+    except Exception as e:
+        logger.warning(f"PIL Skin tone check failed: {e}")
 
     rating = random.randint(4, 8)
     return False, 'Fallback', rating, "1. الإضاءة: مقبولة.\n2. الجودة: جيدة.\n3. الزاوية: عادية."
@@ -220,8 +274,11 @@ BOY_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبل وماك
 GIRL_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبلين فيها وماكو منها.', 'ذوقج كلش راقي، طالعة فد شيء روعة ومميزة.']
 
 with db_lock:
-    cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPER_ADMIN,))
-    conn.commit()
+    try:
+        cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPER_ADMIN,))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to insert super admin: {e}")
 
 # ==========================================
 # لوحة تحكم الأدمن
@@ -251,16 +308,19 @@ def send_admin_panel(chat_id, message_id=None):
     markup.add(btn("تغيير السورس", callback_data='change_source', emoji_id=E['python'], style="primary"))
     text = '> أهلاً بك في *لوحة تحكم الأدمن الشاملة*\\.\n> اختر القسم المطلوب للتحكم الكامل بالبوت\\.'
     if message_id:
-        try: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
-        except: bot.send_message(chat_id, text, reply_markup=markup)
-    else: bot.send_message(chat_id, text, reply_markup=markup)
+        safe_edit_message_text(chat_id, message_id, text, reply_markup=markup)
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup)
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.from_user.id
     with db_lock:
-        cursor.execute('INSERT OR IGNORE INTO users (user_id, photos_rated, last_photo_time, nsfw_warnings, banned, daily_count, last_submit_date) VALUES (?, 0, 0, 0, 0, 0, ?)', (user_id, date.today().isoformat()))
-        conn.commit()
+        try:
+            cursor.execute('INSERT OR IGNORE INTO users (user_id, photos_rated, last_photo_time, nsfw_warnings, banned, daily_count, last_submit_date) VALUES (?, 0, 0, 0, 0, 0, ?)', (user_id, date.today().isoformat()))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error inserting user {user_id}: {e}")
     
     if is_banned(user_id):
         bot.send_message(message.chat.id, '> 🚫 تم حظر حسابك من استخدام البوت بسبب إرسال محتوى غير لائق\\.')
@@ -292,195 +352,207 @@ def start_cmd(message):
         markup.add(btn("👨‍💻 المطور", url=dev_url, emoji_id=E['crown'], style="primary"), btn("📡 قناة السورس", url=source_url, emoji_id=E['python'], style="primary"))
         caption = '> هلا بيك ببوت تقييم الصور\\! دزلنا صورتك ونقيمها إلك وننشرها بالقناة الأحسن\\.'
         fixed_img = get_setting('fixed_image_id', '')
-        if fixed_img: bot.send_photo(message.chat.id, fixed_img, caption=caption, reply_markup=markup)
-        else: bot.send_message(message.chat.id, caption, reply_markup=markup)
+        if fixed_img: 
+            try: bot.send_photo(message.chat.id, fixed_img, caption=caption, reply_markup=markup)
+            except: bot.send_message(message.chat.id, caption, reply_markup=markup)
+        else: 
+            bot.send_message(message.chat.id, caption, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
-    chat_id = call.message.chat.id; user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    answered = False
     
-    if call.data == 'user_send_pic':
-        bot.send_message(chat_id, '> دز الصورة مالتك حالياً حتى نبلش ونقيمها إلك\\.')
-    elif call.data == 'admin_upload_photo':
-        bot.send_message(chat_id, '> 📤 أرسل الصورة الآن للتقييم والنشر\\.\n> \\(الأدمن معفى من الحد اليومي والانتظار\\)')
-    elif call.data == 'my_stats':
-        with db_lock:
-            cursor.execute('SELECT photos_rated, daily_count FROM users WHERE user_id=?', (user_id,))
-            row = cursor.fetchone()
-            count = row[0] if row else 0
-            daily = row[1] if row else 0
-        bot.answer_callback_query(call.id, f'إجمالي صورك: {count}\nصور اليوم: {daily}/3', show_alert=True)
-    elif call.data == 'rate_click':
-        bot.answer_callback_query(call.id, 'شكراً لتقييمك للصورة! ⭐', show_alert=False)
-    elif call.data in ['gender_boy', 'gender_girl']:
-        if user_id not in user_temp_photos:
-            bot.send_message(chat_id, '> انتهت جلسة الصورة، يرجى إرسال الصورة من جديد\\.')
-            return
-        target_chan = get_setting('target_channel', '')
-        if not target_chan:
-            bot.send_message(chat_id, '> ما مضافة قناة للنشر لحد الان، راسل الأدمن حتى يضيفها\\.')
-            return
-            
-        data = user_temp_photos.pop(user_id)
-        photo_id = data['photo_id']
-        
-        bot.send_chat_action(chat_id, 'typing')
-        
-        # === شريط التقدم (Progress Bar) أثناء التحليل ===
-        progress_msg = bot.send_message(chat_id, '> ⏳ جارٍ استلام الصورة\\.\\.\\.')
-        time.sleep(0.5)
-        bot.edit_message_text('> 🔄 رفع الصورة إلى السحابة\\.\\.\\.', chat_id, progress_msg.message_id)
-        time.sleep(1)
-        bot.edit_message_text('> 🤖 الذكاء الاصطناعي يفحص المحتوى ويحلل الجودة\\.\\.\\.', chat_id, progress_msg.message_id)
-        
-        is_nsfw, method, rating, report_text = analyze_and_rate_photo(photo_id)
-        
-        bot.edit_message_text('> ✅ اكتمل التحليل، جارٍ النشر\\.\\.\\.', chat_id, progress_msg.message_id)
-        
-        if is_nsfw:
+    try:
+        if call.data == 'user_send_pic':
+            bot.send_message(chat_id, '> دز الصورة مالتك حالياً حتى نبلش ونقيمها إلك\\.')
+        elif call.data == 'admin_upload_photo':
+            bot.send_message(chat_id, '> 📤 أرسل الصورة الآن للتقييم والنشر\\.\n> \\(الأدمن معفى من الحد اليومي والانتظار\\)')
+        elif call.data == 'my_stats':
             with db_lock:
-                cursor.execute('INSERT INTO nsfw_logs (user_id, photo_id, detected_at, method) VALUES (?, ?, ?, ?)', (user_id, photo_id, datetime.now().isoformat(), method))
-                cursor.execute('SELECT nsfw_warnings FROM users WHERE user_id=?', (user_id,))
-                row = cursor.fetchone(); warnings = row[0] + 1 if row else 1
-                
-                if warnings >= 3:
-                    cursor.execute('UPDATE users SET banned=1, nsfw_warnings=? WHERE user_id=?', (warnings, user_id))
-                    conn.commit()
-                    bot.send_message(chat_id, '> ⚠️ تم رفض الصورة\\!\n> الصورة تحتوي على محتوى غير لائق\\.\n> لن يتم نشرها\\.')
-                    bot.send_message(chat_id, '> 🚫 لقد تجاوزت الحد المسموح من التحذيرات\\.\n> تم حظر حسابك نهائياً من استخدام البوت\\.')
-                    try: bot.send_message(SUPER_ADMIN, f'> 🚫 *تم حظر مستخدم تلقائياً*\n> المستخدم: `{user_id}`\n> السبب: تكرار إرسال صور غير لائقة')
-                    except: pass
+                cursor.execute('SELECT photos_rated, daily_count FROM users WHERE user_id=?', (user_id,))
+                row = cursor.fetchone()
+                count = row[0] if row else 0
+                daily = row[1] if row else 0
+            bot.answer_callback_query(call.id, f'إجمالي صورك: {count}\nصور اليوم: {daily}/3', show_alert=True)
+            answered = True
+        elif call.data == 'rate_click':
+            bot.answer_callback_query(call.id, 'شكراً لتقييمك للصورة! ⭐', show_alert=False)
+            answered = True
+        elif call.data in ['gender_boy', 'gender_girl']:
+            data = user_temp_photos.pop(user_id, None)
+            if not data:
+                bot.send_message(chat_id, '> انتهت جلسة الصورة، يرجى إرسال الصورة من جديد\\.')
+            else:
+                target_chan = get_setting('target_channel', '')
+                if not target_chan:
+                    bot.send_message(chat_id, '> ما مضافة قناة للنشر لحد الان، راسل الأدمن حتى يضيفها\\.')
                 else:
-                    cursor.execute('UPDATE users SET nsfw_warnings=? WHERE user_id=?', (warnings, user_id))
-                    conn.commit()
-                    bot.send_message(chat_id, '> ⚠️ تم رفض الصورة\\!\n> الصورة تحتوي على محتوى غير لائق أو إيحاء\\.\n> لن يتم نشرها\\.')
-                    bot.send_message(chat_id, f'> 🚨 لديك إنذار {warnings} من 3\\.\n> بقي لك {3 - warnings} تحذير وسيتم حظر حسابك نهائياً\\.')
-            return
+                    photo_id = data.get('photo_id')
+                    bot.send_chat_action(chat_id, 'typing')
+                    
+                    # شريط التقدم بدون sleeps لمنع حجب الخيوط
+                    progress_msg = bot.send_message(chat_id, '> 🤖 الذكاء الاصطناعي يفحص المحتوى ويحلل الجودة\\.\\.\\.')
+                    
+                    is_nsfw, method, rating, report_text = analyze_and_rate_photo(photo_id)
+                    
+                    safe_edit_message_text(chat_id, progress_msg.message_id, '> ✅ اكتمل التحليل، جارٍ النشر\\.\\.\\.')
+                    
+                    if is_nsfw:
+                        with db_lock:
+                            cursor.execute('INSERT INTO nsfw_logs (user_id, photo_id, detected_at, method) VALUES (?, ?, ?, ?)', (user_id, photo_id, datetime.now().isoformat(), method))
+                            cursor.execute('SELECT nsfw_warnings FROM users WHERE user_id=?', (user_id,))
+                            row = cursor.fetchone()
+                            warnings = (row[0] + 1) if row else 1
+                            
+                            if warnings >= 3:
+                                cursor.execute('UPDATE users SET banned=1, nsfw_warnings=? WHERE user_id=?', (warnings, user_id))
+                                conn.commit()
+                                bot.send_message(chat_id, '> ⚠️ تم رفض الصورة\\!\n> الصورة تحتوي على محتوى غير لائق\\.\n> لن يتم نشرها\\.')
+                                bot.send_message(chat_id, '> 🚫 لقد تجاوزت الحد المسموح من التحذيرات\\.\n> تم حظر حسابك نهائياً من استخدام البوت\\.')
+                                try: bot.send_message(SUPER_ADMIN, f'> 🚫 *تم حظر مستخدم تلقائياً*\n> المستخدم: `{user_id}`\n> السبب: تكرار إرسال صور غير لائقة')
+                                except: pass
+                            else:
+                                cursor.execute('UPDATE users SET nsfw_warnings=? WHERE user_id=?', (warnings, user_id))
+                                conn.commit()
+                                bot.send_message(chat_id, '> ⚠️ تم رفض الصورة\\!\n> الصورة تحتوي على محتوى غير لائق أو إيحاء\\.\n> لن يتم نشرها\\.')
+                                bot.send_message(chat_id, f'> 🚨 لديك إنذار {warnings} من 3\\.\n> بقي لك {3 - warnings} تحذير وسيتم حظر حسابك نهائياً\\.')
+                    else:
+                        caption_text = (
+                            f'> 📸 *تقرير تقييم الصورة*\n\n'
+                            f'> {escape_md(report_text)}\n'
+                        )
+                        
+                        channel_markup = types.InlineKeyboardMarkup(row_width=2)
+                        try:
+                            bot_username = bot.get_me().username
+                        except:
+                            bot_username = "bot"
+                            
+                        channel_markup.add(
+                            btn("🤖 دخول البوت", url=f"https://t.me/{bot_username}?start=ref", style="success"),
+                            btn("⭐ تقييم صورة", callback_data='rate_click', style="primary")
+                        )
+                        
+                        try:
+                            bot.send_photo(target_chan, photo_id, caption=caption_text, reply_markup=channel_markup)
+                            bot.send_message(chat_id, '> ✅ عاشت إيدك، تم تحليل الصورة ونشرها بقناة التقييم بنجاح\\!')
+                            with db_lock:
+                                cursor.execute('UPDATE users SET photos_rated = photos_rated + 1 WHERE user_id=?', (user_id,))
+                                conn.commit()
+                        except Exception as e:
+                            bot.send_message(chat_id, f'> صار خطأ بالنشر، تأكد البوت أدمن بالقناة\\.\nالخطأ: {escape_md(str(e))}')
 
-        # تجهيز النص للنشر (مع تطبيق escape_md لمنع انهيار البوت)
-        caption_text = (
-            f'> 📸 *تقرير تقييم الصورة*\n\n'
-            f'> {escape_md(report_text)}\n'
-        )
-        
-        channel_markup = types.InlineKeyboardMarkup(row_width=2)
-        try:
-            bot_username = bot.get_me().username
-        except:
-            bot_username = "bot"
-            
-        channel_markup.add(
-            btn("🤖 دخول البوت", url=f"https://t.me/{bot_username}?start=ref", style="success"),
-            btn("⭐ تقييم صورة", callback_data='rate_click', style="primary")
-        )
-        
-        try:
-            bot.send_photo(target_chan, photo_id, caption=caption_text, reply_markup=channel_markup)
-            bot.send_message(chat_id, '> ✅ عاشت إيدك، تم تحليل الصورة ونشرها بقناة التقييم بنجاح\\!')
-            with db_lock:
-                cursor.execute('UPDATE users SET photos_rated = photos_rated + 1 WHERE user_id=?', (user_id,))
-                conn.commit()
-        except Exception as e:
-            bot.send_message(chat_id, f'> صار خطأ بالنشر، تأكد البوت أدمن بالقناة\\.\nالخطأ: {escape_md(str(e))}')
+        # === أزرار الأدمن ===
+        if is_admin(user_id):
+            if call.data == 'back_admin': send_admin_panel(chat_id, call.message.message_id)
+            elif call.data == 'detailed_stats':
+                with db_lock:
+                    cursor.execute("SELECT COUNT(*) FROM users"); total_users = cursor.fetchone()[0]
+                    cursor.execute("SELECT COUNT(*) FROM users WHERE banned=1"); banned_users = cursor.fetchone()[0]
+                    cursor.execute("SELECT COUNT(*) FROM nsfw_logs"); nsfw_attempts = cursor.fetchone()[0]
+                    cursor.execute("SELECT SUM(photos_rated) FROM users"); total_ratings = cursor.fetchone()[0] or 0
+                stats_text = (
+                    f'> 📊 *الإحصائيات التفصيلية*\n\n'
+                    f'> 👥 إجمالي المستخدمين: `{total_users}`\n'
+                    f'> 🚫 المحظورون: `{banned_users}`\n'
+                    f'> ⚠️ محاولات إباحية: `{nsfw_attempts}`\n'
+                    f'> 📸 إجمالي الصور المقيّمة: `{total_ratings}`\n'
+                )
+                safe_edit_message_text(chat_id, call.message.message_id, stats_text)
+            elif call.data == 'menu_protection':
+                markup = types.InlineKeyboardMarkup()
+                markup.add(btn("عرض المحظورين", callback_data='view_banned', emoji_id=E['people'], style="primary"))
+                markup.add(btn("إلغاء حظر مستخدم", callback_data='unban_user_input', emoji_id=E['check'], style="success"))
+                markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+                safe_edit_message_text(chat_id, call.message.message_id, '> 🛡️ *قسم الحماية والمحظورين*', reply_markup=markup)
+            elif call.data == 'view_banned':
+                with db_lock:
+                    cursor.execute("SELECT user_id, nsfw_warnings FROM users WHERE banned=1")
+                    banned_list = cursor.fetchall()
+                if banned_list:
+                    text = '> 🚫 *قائمة المحظورين:*\n\n'
+                    for b in banned_list: text += f'> ID: `{b[0]}` \\| التحذيرات: {b[1]}\n'
+                else: text = '> ✅ لا يوجد مستخدمون محظورون حالياً\\.'
+                bot.send_message(chat_id, text)
+            elif call.data == 'unban_user_input':
+                msg = bot.send_message(chat_id, '> دز أيدي \\(ID\\) المستخدم لإلغاء حظره:')
+                bot.register_next_step_handler(msg, process_unban)
+            elif call.data == 'menu_settings':
+                maint_status = "مفعّل 🔴" if get_setting('maintenance_mode', '0') == '1' else "معطّل 🟢"
+                markup = types.InlineKeyboardMarkup()
+                markup.add(btn(f"وضع الصيانة ({maint_status})", callback_data='toggle_maintenance', emoji_id=E['settings'], style="danger" if get_setting('maintenance_mode', '0') == '1' else "success"))
+                markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+                safe_edit_message_text(chat_id, call.message.message_id, '> ⚙️ *الإعدادات العامة*', reply_markup=markup)
+            elif call.data == 'toggle_maintenance':
+                current = get_setting('maintenance_mode', '0')
+                set_setting('maintenance_mode', '1' if current == '0' else '0')
+                send_admin_panel(chat_id, call.message.message_id)
+            elif call.data == 'menu_broadcast':
+                markup = types.InlineKeyboardMarkup()
+                markup.add(btn("إرسال رسالة الآن", callback_data='do_broadcast', emoji_id=E['fire'], style="danger"))
+                markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+                safe_edit_message_text(chat_id, call.message.message_id, '> 📣 إرسال جماعي لكل المستخدمين:', reply_markup=markup)
+            elif call.data == 'do_broadcast':
+                msg = bot.send_message(chat_id, '> دز الرسالة النصية ال تريدها أن توصل للجميع:')
+                bot.register_next_step_handler(msg, process_broadcast)
+            elif call.data == 'change_dev':
+                msg = bot.send_message(chat_id, '> دز معرف المطور الجديد \\(مثال: @username\\):')
+                bot.register_next_step_handler(msg, save_dev)
+            elif call.data == 'change_source':
+                msg = bot.send_message(chat_id, '> دز رابط أو معرف قناة السورس الجديدة:')
+                bot.register_next_step_handler(msg, save_source)
+            elif call.data == 'menu_channel':
+                markup = types.InlineKeyboardMarkup()
+                markup.add(btn("إضافة قناة", callback_data='add_target_chan', emoji_id=E['check'], style="success"), btn("حذف القناة", callback_data='del_target_chan', emoji_id=E['cross'], style="danger"))
+                markup.add(btn("عرض القناة", callback_data='show_target_chan', emoji_id=E['link'], style="primary"))
+                markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+                safe_edit_message_text(chat_id, call.message.message_id, '> خيارات إعداد قناة التقييم والنشر:', reply_markup=markup)
+            elif call.data == 'add_target_chan':
+                msg = bot.send_message(chat_id, '> دز معرف أو أيدي القناة \\(مثال: @channel\\):')
+                bot.register_next_step_handler(msg, save_target_channel)
+            elif call.data == 'show_target_chan':
+                target = get_setting('target_channel', 'ما مضافة قناة لحد الان')
+                bot.send_message(chat_id, f'> القناة الحالية للنشر: {escape_md(target)}')
+            elif call.data == 'del_target_chan':
+                set_setting('target_channel', ''); bot.send_message(chat_id, '> تم حذف قناة التقييم بنجاح\\.')
+            elif call.data == 'menu_sub':
+                markup = types.InlineKeyboardMarkup()
+                markup.add(btn("إضافة قناة", callback_data='add_sub_chan', emoji_id=E['check'], style="success"), btn("حذف القناة", callback_data='del_sub_chan', emoji_id=E['cross'], style="danger"))
+                markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+                safe_edit_message_text(chat_id, call.message.message_id, '> إعدادات قناة الاشتراك الإجباري:', reply_markup=markup)
+            elif call.data == 'add_sub_chan':
+                msg = bot.send_message(chat_id, '> دز معرف قناة الاشتراك الإجباري \\(مثال: @channel\\):')
+                bot.register_next_step_handler(msg, save_sub_channel)
+            elif call.data == 'del_sub_chan':
+                set_setting('sub_channel', ''); bot.send_message(chat_id, '> تم إلغاء الاشتراك الإجباري\\.')
+            elif call.data == 'menu_admins':
+                markup = types.InlineKeyboardMarkup()
+                markup.add(btn("إضافة أدمن", callback_data='add_admin', emoji_id=E['check'], style="success"), btn("عرض الأدمنية", callback_data='show_admins', emoji_id=E['people'], style="primary"))
+                markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
+                safe_edit_message_text(chat_id, call.message.message_id, '> قائمة خيارات إداري البوت:', reply_markup=markup)
+            elif call.data == 'add_admin':
+                msg = bot.send_message(chat_id, '> دز أيدي \\(ID\\) الأدمن الجديد:')
+                bot.register_next_step_handler(msg, save_new_admin)
+            elif call.data == 'show_admins':
+                with db_lock:
+                    cursor.execute('SELECT user_id FROM admins')
+                    admin_list = [str(r[0]) for r in cursor.fetchall()]
+                bot.send_message(chat_id, '> قائمة الأدمنية:\n' + '\n'.join(admin_list))
+            elif call.data == 'set_fixed_img':
+                msg = bot.send_message(chat_id, '> دز الصورة الثابتة للترحيب بكل المستخدمين:')
+                bot.register_next_step_handler(msg, save_fixed_image)
 
-    # === أزرار الأدمن ===
-    if is_admin(user_id):
-        if call.data == 'back_admin': send_admin_panel(chat_id, call.message.message_id)
-        elif call.data == 'detailed_stats':
-            with db_lock:
-                cursor.execute("SELECT COUNT(*) FROM users"); total_users = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM users WHERE banned=1"); banned_users = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM nsfw_logs"); nsfw_attempts = cursor.fetchone()[0]
-                cursor.execute("SELECT SUM(photos_rated) FROM users"); total_ratings = cursor.fetchone()[0] or 0
-            stats_text = (
-                f'> 📊 *الإحصائيات التفصيلية*\n\n'
-                f'> 👥 إجمالي المستخدمين: `{total_users}`\n'
-                f'> 🚫 المحظورون: `{banned_users}`\n'
-                f'> ⚠️ محاولات إباحية: `{nsfw_attempts}`\n'
-                f'> 📸 إجمالي الصور المقيّمة: `{total_ratings}`\n'
-            )
-            bot.edit_message_text(stats_text, chat_id, call.message.message_id)
-        elif call.data == 'menu_protection':
-            markup = types.InlineKeyboardMarkup()
-            markup.add(btn("عرض المحظورين", callback_data='view_banned', emoji_id=E['people'], style="primary"))
-            markup.add(btn("إلغاء حظر مستخدم", callback_data='unban_user_input', emoji_id=E['check'], style="success"))
-            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
-            bot.edit_message_text('> 🛡️ *قسم الحماية والمحظورين*', chat_id, call.message.message_id, reply_markup=markup)
-        elif call.data == 'view_banned':
-            with db_lock:
-                cursor.execute("SELECT user_id, nsfw_warnings FROM users WHERE banned=1")
-                banned_list = cursor.fetchall()
-            if banned_list:
-                text = '> 🚫 *قائمة المحظورين:*\n\n'
-                for b in banned_list: text += f'> ID: `{b[0]}` \\| التحذيرات: {b[1]}\n'
-            else: text = '> ✅ لا يوجد مستخدمون محظورون حالياً\\.'
-            bot.send_message(chat_id, text)
-        elif call.data == 'unban_user_input':
-            msg = bot.send_message(chat_id, '> دز أيدي \\(ID\\) المستخدم لإلغاء حظره:')
-            bot.register_next_step_handler(msg, process_unban)
-        elif call.data == 'menu_settings':
-            maint_status = "مفعّل 🔴" if get_setting('maintenance_mode', '0') == '1' else "معطّل 🟢"
-            markup = types.InlineKeyboardMarkup()
-            markup.add(btn(f"وضع الصيانة ({maint_status})", callback_data='toggle_maintenance', emoji_id=E['settings'], style="danger" if get_setting('maintenance_mode', '0') == '1' else "success"))
-            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
-            bot.edit_message_text('> ⚙️ *الإعدادات العامة*', chat_id, call.message.message_id, reply_markup=markup)
-        elif call.data == 'toggle_maintenance':
-            current = get_setting('maintenance_mode', '0')
-            set_setting('maintenance_mode', '1' if current == '0' else '0')
-            send_admin_panel(chat_id, call.message.message_id)
-        elif call.data == 'menu_broadcast':
-            markup = types.InlineKeyboardMarkup()
-            markup.add(btn("إرسال رسالة الآن", callback_data='do_broadcast', emoji_id=E['fire'], style="danger"))
-            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
-            bot.edit_message_text('> 📣 إرسال جماعي لكل المستخدمين:', chat_id, call.message.message_id, reply_markup=markup)
-        elif call.data == 'do_broadcast':
-            msg = bot.send_message(chat_id, '> دز الرسالة النصية ال تريدها أن توصل للجميع:')
-            bot.register_next_step_handler(msg, process_broadcast)
-        elif call.data == 'change_dev':
-            msg = bot.send_message(chat_id, '> دز معرف المطور الجديد \\(مثال: @username\\):')
-            bot.register_next_step_handler(msg, save_dev)
-        elif call.data == 'change_source':
-            msg = bot.send_message(chat_id, '> دز رابط أو معرف قناة السورس الجديدة:')
-            bot.register_next_step_handler(msg, save_source)
-        elif call.data == 'menu_channel':
-            markup = types.InlineKeyboardMarkup()
-            markup.add(btn("إضافة قناة", callback_data='add_target_chan', emoji_id=E['check'], style="success"), btn("حذف القناة", callback_data='del_target_chan', emoji_id=E['cross'], style="danger"))
-            markup.add(btn("عرض القناة", callback_data='show_target_chan', emoji_id=E['link'], style="primary"))
-            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
-            bot.edit_message_text('> خيارات إعداد قناة التقييم والنشر:', chat_id, call.message.message_id, reply_markup=markup)
-        elif call.data == 'add_target_chan':
-            msg = bot.send_message(chat_id, '> دز معرف أو أيدي القناة \\(مثال: @channel\\):')
-            bot.register_next_step_handler(msg, save_target_channel)
-        elif call.data == 'show_target_chan':
-            target = get_setting('target_channel', 'ما مضافة قناة لحد الان')
-            bot.send_message(chat_id, f'> القناة الحالية للنشر: {escape_md(target)}')
-        elif call.data == 'del_target_chan':
-            set_setting('target_channel', ''); bot.send_message(chat_id, '> تم حذف قناة التقييم بنجاح\\.')
-        elif call.data == 'menu_sub':
-            markup = types.InlineKeyboardMarkup()
-            markup.add(btn("إضافة قناة", callback_data='add_sub_chan', emoji_id=E['check'], style="success"), btn("حذف القناة", callback_data='del_sub_chan', emoji_id=E['cross'], style="danger"))
-            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
-            bot.edit_message_text('> إعدادات قناة الاشتراك الإجباري:', chat_id, call.message.message_id, reply_markup=markup)
-        elif call.data == 'add_sub_chan':
-            msg = bot.send_message(chat_id, '> دز معرف قناة الاشتراك الإجباري \\(مثال: @channel\\):')
-            bot.register_next_step_handler(msg, save_sub_channel)
-        elif call.data == 'del_sub_chan':
-            set_setting('sub_channel', ''); bot.send_message(chat_id, '> تم إلغاء الاشتراك الإجباري\\.')
-        elif call.data == 'menu_admins':
-            markup = types.InlineKeyboardMarkup()
-            markup.add(btn("إضافة أدمن", callback_data='add_admin', emoji_id=E['check'], style="success"), btn("عرض الأدمنية", callback_data='show_admins', emoji_id=E['people'], style="primary"))
-            markup.add(btn("رجوع", callback_data='back_admin', emoji_id=E['arrow'], style="primary"))
-            bot.edit_message_text('> قائمة خيارات إداري البوت:', chat_id, call.message.message_id, reply_markup=markup)
-        elif call.data == 'add_admin':
-            msg = bot.send_message(chat_id, '> دز أيدي \\(ID\\) الأدمن الجديد:')
-            bot.register_next_step_handler(msg, save_new_admin)
-        elif call.data == 'show_admins':
-            with db_lock:
-                cursor.execute('SELECT user_id FROM admins'); admin_list = [str(r[0]) for r in cursor.fetchall()]
-            bot.send_message(chat_id, '> قائمة الأدمنية:\n' + '\n'.join(admin_list))
-        elif call.data == 'set_fixed_img':
-            msg = bot.send_message(chat_id, '> دز الصورة الثابتة للترحيب بكل المستخدمين:')
-            bot.register_next_step_handler(msg, save_fixed_image)
+        # الرد على أي زر لم يتم الرد عليه لمنع دوران التحميل
+        if not answered:
+            try: bot.answer_callback_query(call.id)
+            except: pass
+
+    except Exception as e:
+        logger.exception(f"Error in callback_listener for data {call.data}: {e}")
+        try: bot.answer_callback_query(call.id, "حدث خطأ أثناء تنفيذ العملية.", show_alert=True)
+        except: pass
 
 # ==========================================
 # معالجة الصور المستلمة
@@ -489,10 +561,12 @@ def callback_listener(call):
 def handle_user_photo(message):
     user_id = message.from_user.id
     
-    # التأكد من وجود المستخدم في قاعدة البيانات لمنع الأخطاء
-    with db_lock:
-        cursor.execute('INSERT OR IGNORE INTO users (user_id, photos_rated, last_photo_time, nsfw_warnings, banned, daily_count, last_submit_date) VALUES (?, 0, 0, 0, 0, 0, ?)', (user_id, date.today().isoformat()))
-        conn.commit()
+    try:
+        with db_lock:
+            cursor.execute('INSERT OR IGNORE INTO users (user_id, photos_rated, last_photo_time, nsfw_warnings, banned, daily_count, last_submit_date) VALUES (?, 0, 0, 0, 0, 0, ?)', (user_id, date.today().isoformat()))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"DB error in handle_user_photo: {e}")
         
     if is_banned(user_id):
         bot.send_message(message.chat.id, '> 🚫 تم حظر حسابك من استخدام البوت\\.')
@@ -507,30 +581,36 @@ def handle_user_photo(message):
     current_time = int(time.time())
     today = date.today().isoformat()
     
-    with db_lock:
-        cursor.execute('SELECT last_photo_time, daily_count, last_submit_date FROM users WHERE user_id=?', (user_id,))
-        row = cursor.fetchone()
-        last_time = row[0] if row else 0
-        daily_count = row[1] if row else 0
-        last_submit_date = row[2] if row else today
-        
-        if last_submit_date != today:
-            daily_count = 0
+    try:
+        with db_lock:
+            cursor.execute('SELECT last_photo_time, daily_count, last_submit_date FROM users WHERE user_id=?', (user_id,))
+            row = cursor.fetchone()
+            last_time = row[0] if row else 0
+            daily_count = row[1] if row else 0
+            last_submit_date = row[2] if row else today
             
-        if not is_admin(user_id):
-            if daily_count >= 3:
-                bot.send_message(message.chat.id, '> ⚠️ وصلت الحد الأقصى لليوم \\(3 صور\\)\\.\n> عد غداً حتى تقدر تدز صور جديدة\\.')
-                return
-            if current_time - last_time < 30:
-                bot.send_message(message.chat.id, f'> ⏱️ عد بعد {30 - (current_time - last_time)} ثانية حتى تقدر تدز صورة ثانية\\.')
-                return
+            if last_submit_date != today:
+                daily_count = 0
+                
+            if not is_admin(user_id):
+                if daily_count >= 3:
+                    bot.send_message(message.chat.id, '> ⚠️ وصلت الحد الأقصى لليوم \\(3 صور\\)\\.\n> عد غداً حتى تقدر تدز صور جديدة\\.')
+                    return
+                if current_time - last_time < 30:
+                    bot.send_message(message.chat.id, f'> ⏱️ عد بعد {30 - (current_time - last_time)} ثانية حتى تقدر تدز صورة ثانية\\.')
+                    return
 
-        cursor.execute('UPDATE users SET last_photo_time=?, daily_count=?, last_submit_date=? WHERE user_id=?', 
-                       (current_time, daily_count + 1, today, user_id))
-        conn.commit()
+            cursor.execute('UPDATE users SET last_photo_time=?, daily_count=?, last_submit_date=? WHERE user_id=?', 
+                           (current_time, daily_count + 1, today, user_id))
+            conn.commit()
+    except Exception as e:
+        logger.exception(f"DB limit check error: {e}")
+        
+    if not message.photo:
+        return
         
     photo_id = message.photo[-1].file_id
-    user_temp_photos[user_id] = {'photo_id': photo_id}
+    user_temp_photos[user_id] = {'photo_id': photo_id, 'timestamp': current_time}
     
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -549,32 +629,59 @@ def process_unban(message):
             cursor.execute('UPDATE users SET banned=0, nsfw_warnings=0 WHERE user_id=?', (target_id,))
             conn.commit()
         bot.send_message(message.chat.id, f'> ✅ تم إلغاء حظر المستخدم `{target_id}` وتصفير تحذيراته\\.')
-    except:
+    except Exception:
         bot.send_message(message.chat.id, '> ⚠️ الأيدي غير صحيح\\.')
 
 def process_broadcast(message):
     sent = 0; failed = 0
-    with db_lock:
-        cursor.execute('SELECT user_id FROM users'); users = cursor.fetchall()
-    bot.send_message(message.chat.id, f'> جاري الإرسال لـ {len(users)} مستخدم\\.\\.\\.')
-    for (uid,) in users:
-        try: bot.send_message(uid, message.text); sent += 1; time.sleep(0.05)
-        except: failed += 1
-    bot.send_message(message.chat.id, f'> ✅ تم الإرسال\\!\n> نجح: {sent}\n> فشل: {failed}')
+    try:
+        with db_lock:
+            cursor.execute('SELECT user_id FROM users')
+            users = cursor.fetchall()
+        bot.send_message(message.chat.id, f'> جاري الإرسال لـ {len(users)} مستخدم\\.\\.\\.')
+        for (uid,) in users:
+            try: 
+                bot.send_message(uid, message.text)
+                sent += 1
+                time.sleep(0.05)
+            except Exception: 
+                failed += 1
+        bot.send_message(message.chat.id, f'> ✅ تم الإرسال\\!\n> نجح: {sent}\n> فشل: {failed}')
+    except Exception as e:
+        logger.exception(f"Broadcast error: {e}")
 
-def save_dev(message): set_setting('dev_user', message.text); bot.send_message(message.chat.id, f'> تم حفظ حساب المطور بنجاح: {escape_md(message.text)}')
-def save_source(message): set_setting('source_channel', message.text); bot.send_message(message.chat.id, f'> تم حفظ قناة السورس بنجاح: {escape_md(message.text)}')
-def save_target_channel(message): set_setting('target_channel', message.text); bot.send_message(message.chat.id, f'> تم ربط قناة التقييم بنجاح\\.\n\n> القناة المربوطة حالياً: {escape_md(message.text)}')
-def save_sub_channel(message): set_setting('sub_channel', message.text); bot.send_message(message.chat.id, f'> تم حفظ قناة الاشتراك الإجباري بنجاح\\.\n\n> القناة الحالية: {escape_md(message.text)}')
+def save_dev(message): 
+    set_setting('dev_user', message.text)
+    bot.send_message(message.chat.id, f'> تم حفظ حساب المطور بنجاح: {escape_md(message.text)}')
+
+def save_source(message): 
+    set_setting('source_channel', message.text)
+    bot.send_message(message.chat.id, f'> تم حفظ قناة السورس بنجاح: {escape_md(message.text)}')
+
+def save_target_channel(message): 
+    set_setting('target_channel', message.text)
+    bot.send_message(message.chat.id, f'> تم ربط قناة التقييم بنجاح\\.\n\n> القناة المربوطة حالياً: {escape_md(message.text)}')
+
+def save_sub_channel(message): 
+    set_setting('sub_channel', message.text)
+    bot.send_message(message.chat.id, f'> تم حفظ قناة الاشتراك الإجباري بنجاح\\.\n\n> القناة الحالية: {escape_md(message.text)}')
+
 def save_new_admin(message):
     try:
         new_id = int(message.text)
-        with db_lock: cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (new_id,)); conn.commit()
+        with db_lock: 
+            cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (new_id,))
+            conn.commit()
         bot.send_message(message.chat.id, '> تم إضافة الأدمن الجديد بنجاح\\.')
-    except: bot.send_message(message.chat.id, '> الأيدي غير صحيح، يرجى كتابة أرقام فقط\\.')
+    except Exception:
+        bot.send_message(message.chat.id, '> الأيدي غير صحيح، يرجى كتابة أرقام فقط\\.')
+
 def save_fixed_image(message):
-    if message.photo: set_setting('fixed_image_id', message.photo[-1].file_id); bot.send_message(message.chat.id, '> تم تثبيت الصورة للترحيب بنجاح\\.')
-    else: bot.send_message(message.chat.id, '> هذه مو صورة، يرجى إرسال صورة حصراً\\.')
+    if message.photo: 
+        set_setting('fixed_image_id', message.photo[-1].file_id)
+        bot.send_message(message.chat.id, '> تم تثبيت الصورة للترحيب بنجاح\\.')
+    else: 
+        bot.send_message(message.chat.id, '> هذه مو صورة، يرجى إرسال صورة حصراً\\.')
 
 # ==========================================
 # نقطة التشغيل
@@ -582,12 +689,26 @@ def save_fixed_image(message):
 def run_bot():
     while True:
         try:
-            bot.infinity_polling(timeout=30, long_polling_timeout=20, skip_pending=True)
+            logger.info("Starting Telegram Bot Polling...")
+            bot.infinity_polling(timeout=30, long_polling_timeout=30, skip_pending=True)
         except Exception as e:
-            print(f"Bot Polling Error: {e}. Retrying in 10 seconds...")
+            logger.exception(f"Bot Polling Crashed! Retrying in 10 seconds... Error: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)).start()
-    if APP_URL: threading.Thread(target=keep_alive_ping, daemon=True).start()
-    run_bot()
+    try:
+        # تشغيل خادم Flask في Thread منفصل
+        flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False), daemon=True)
+        flask_thread.start()
+        logger.info(f"Flask server started on port {PORT}")
+        
+        # تشغيل المنبه (Keep-Alive)
+        if APP_URL:
+            ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
+            ping_thread.start()
+            logger.info(f"Keep-alive ping started for URL: {APP_URL}")
+        
+        # تشغيل البوت في الـ Thread الرئيسي
+        run_bot()
+    except Exception as e:
+        logger.critical(f"Fatal error in main execution block: {e}")
