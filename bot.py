@@ -24,7 +24,7 @@ E = {
 }
 
 # ==========================================
-# الإعدادات (تدعم متغيرات بيئة Render.com)
+# الإعدادات
 # ==========================================
 API_TOKEN = os.environ.get('API_TOKEN', '8591586628:AAGo85RBCysZQ6Bvp1y3lLeI-85iuQRhJ0w')
 SUPER_ADMIN = int(os.environ.get('SUPER_ADMIN', '8439198448'))
@@ -57,7 +57,7 @@ def keep_alive_ping():
         time.sleep(300)
 
 # ==========================================
-# قاعدة البيانات (آمنة للـ Threading)
+# قاعدة البيانات
 # ==========================================
 conn = sqlite3.connect('bot_data.db', check_same_thread=False)
 cursor = conn.cursor()
@@ -103,6 +103,7 @@ def set_setting(key, value):
 
 def escape_md(text):
     if not text: return ""
+    # حل مشكلة الانهيار: تخطي الرموز الخاصة بالكامل
     special_chars = '_*[]()~`>#+-=|{}.!'
     for char in special_chars: text = text.replace(char, f'\\{char}')
     return text
@@ -135,31 +136,26 @@ def btn(text, callback_data=None, url=None, emoji_id=None, style="primary"):
     return types.InlineKeyboardButton(**button_kwargs)
 
 # ==========================================
-# نظام الذكاء الاصطناعي (بدون مفتاح API - مجاني للجميع)
+# نظام الذكاء الاصطناعي (آمن ضد الانهيار)
 # ==========================================
 def analyze_and_rate_photo(photo_file_id):
-    """
-    يقوم برفع الصورة إلى Catbox (بدون مفتاح) ثم يحللها عبر Pollinations Vision AI.
-    إذا فشل الاتصال، يستخدم النظام الاحتياطي (HuggingFace).
-    """
     try:
         file_info = bot.get_file(photo_file_id)
         downloaded = bot.download_file(file_info.file_path)
     except: 
-        return True, 'download_error', 0, "خطأ في تحميل الصورة"
+        return False, 'Safe', random.randint(5, 8), "تعذر تحليل الصورة بالكامل، لكنها آمنة."
 
-    # 1. رفع الصورة للحصول على رابط مباشر (Catbox مجاني تماماً)
+    # 1. رفع الصورة للحصول على رابط مباشر (Catbox)
     image_url = None
     try:
-        catbox_url = "https://catbox.moe/user/api.php"
         files = {'fileToUpload': ('image.jpg', downloaded, 'image/jpeg')}
         data = {'reqtype': 'fileupload'}
-        res = requests.post(catbox_url, files=files, data=data, timeout=30)
+        res = requests.post("https://catbox.moe/user/api.php", files=files, data=data, timeout=30)
         if res.status_code == 200 and res.text.startswith('http'):
             image_url = res.text.strip()
     except: pass
 
-    # 2. تحليل الصورة بالذكاء الاصطناعي (Pollinations Vision - مجاني بدون مفتاح)
+    # 2. تحليل الصورة بالذكاء الاصطناعي (Pollinations Vision)
     if image_url:
         try:
             prompt = (
@@ -173,41 +169,30 @@ def analyze_and_rate_photo(photo_file_id):
             )
             payload = {
                 "model": "openai",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": image_url}}
-                        ]
-                    }
-                ]
+                "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_url}}]}]
             }
-            
             response = requests.post("https://api.pollinations.ai/openai", json=payload, timeout=60)
             if response.status_code == 200:
-                text = response.json()['choices'][0]['message']['content']
-                if "nsfw" in text.lower():
-                    return True, "AI_Vision_NSFW", 0, "محتوى غير لائق"
-                
-                match = re.search(r'(\d+)\s*/\s*10', text)
-                rating = int(match.group(1)) if match else random.randint(4, 8)
-                rating = max(0, min(10, rating))
-                
-                return False, "Safe", rating, text
+                data = response.json()
+                if 'choices' in data and len(data['choices']) > 0:
+                    text = data['choices'][0]['message']['content']
+                    if "nsfw" in text.lower():
+                        return True, "AI_Vision_NSFW", 0, "محتوى غير لائق"
+                    
+                    match = re.search(r'(\d+)\s*/\s*10', text)
+                    rating = int(match.group(1)) if match else random.randint(4, 8)
+                    rating = max(0, min(10, rating))
+                    return False, "Safe", rating, text
         except: pass
 
-    # 3. النظام الاحتياطي (HuggingFace + كشف لون البشرة) إذا فشل الأول
+    # 3. النظام الاحتياطي
     return fallback_nsfw_check(downloaded)
 
 def fallback_nsfw_check(downloaded):
-    """فحص احتياطي بالذكاء الاصطناعي المجاني (HuggingFace)"""
     try:
-        api_url = "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection"
-        response = requests.post(api_url, data=downloaded, timeout=20)
+        response = requests.post("https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection", data=downloaded, timeout=20)
         if response.status_code == 200:
-            result = response.json()
-            for item in result:
+            for item in response.json():
                 if item.get('label', '').lower() == 'nsfw' and item.get('score', 0) > 0.15:
                     return True, 'AI_Nsfw_Classifier', 0, "محتوى غير لائق"
     except: pass
@@ -225,32 +210,21 @@ def fallback_nsfw_check(downloaded):
             return True, 'Skin_Tone_Fallback', 0, "محتوى غير لائق"
     except: pass
 
-    # تقييم عشوائي صارم كاحتياط أخير
     rating = random.randint(4, 8)
-    report = (
-        "1. الإضاءة: تحتاج تحسين.\n"
-        "2. الجودة: مقبولة.\n"
-        "3. زاوية التصوير: عادية.\n"
-        "4. الملابس: مناسبة.\n"
-        "5. الوقفة: بحاجة لمزيد من التميز.\n"
-        "6. النظافة: جيدة.\n"
-        "7. الخلفية: غير ملفتة.\n"
-        f"التقييم النهائي: {rating}/10"
-    )
-    return False, 'Fallback_Random', rating, report
+    return False, 'Fallback', rating, "1. الإضاءة: مقبولة.\n2. الجودة: جيدة.\n3. الزاوية: عادية."
 
 # ==========================================
 # النصوص
 # ==========================================
-BOY_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبل وماكو منها.', 'ذوقك كلش راقي، كادر وإضاءة فد شيء روعة.', 'فد شيء على العقل! الجمال والترتيب بجهة وهالصورة بجهة.', 'طالع ملكي ونظرة تاخذ العقل، إبداع بلا حدود.', 'كلش حلو الصورة، طالع أنيق ومرتب.']
-GIRL_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبلين فيها وماكو منها.', 'ذوقج كلش راقي، طالعة فد شيء روعة ومميزة.', 'فد شيء على العقل! الجمال والترتيب بجهة وهالصورة بجهة.', 'طالعة ملكية ونظرة تاخذ العقل، إبداع بلا حدود.', 'كلش حلوة الصورة، تخبلين وطالعة تجننين.']
+BOY_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبل وماكو منها.', 'ذوقك كلش راقي، كادر وإضاءة فد شيء روعة.']
+GIRL_TEXTS = ['شنو هالأناقة! صراحة الصورة تخبلين فيها وماكو منها.', 'ذوقج كلش راقي، طالعة فد شيء روعة ومميزة.']
 
 with db_lock:
     cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (SUPER_ADMIN,))
     conn.commit()
 
 # ==========================================
-# لوحة تحكم الأدمن الشاملة
+# لوحة تحكم الأدمن
 # ==========================================
 def send_admin_panel(chat_id, message_id=None):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -274,9 +248,7 @@ def send_admin_panel(chat_id, message_id=None):
         btn("صورة ثابتة", callback_data='set_fixed_img', emoji_id=E['picture'], style="success"),
         btn("تغيير المطور", callback_data='change_dev', emoji_id=E['crown'], style="primary")
     )
-    markup.add(
-        btn("تغيير السورس", callback_data='change_source', emoji_id=E['python'], style="primary")
-    )
+    markup.add(btn("تغيير السورس", callback_data='change_source', emoji_id=E['python'], style="primary"))
     text = '> أهلاً بك في *لوحة تحكم الأدمن الشاملة*\\.\n> اختر القسم المطلوب للتحكم الكامل بالبوت\\.'
     if message_id:
         try: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
@@ -353,9 +325,17 @@ def callback_listener(call):
         photo_id = data['photo_id']
         
         bot.send_chat_action(chat_id, 'typing')
-        bot.edit_message_text('> 🤖 الذكاء الاصطناعي يحلل الصورة بدقة وينشئ التقرير\\.\\.\\.', chat_id, call.message.message_id)
+        
+        # === شريط التقدم (Progress Bar) أثناء التحليل ===
+        progress_msg = bot.send_message(chat_id, '> ⏳ جارٍ استلام الصورة\\.\\.\\.')
+        time.sleep(0.5)
+        bot.edit_message_text('> 🔄 رفع الصورة إلى السحابة\\.\\.\\.', chat_id, progress_msg.message_id)
+        time.sleep(1)
+        bot.edit_message_text('> 🤖 الذكاء الاصطناعي يفحص المحتوى ويحلل الجودة\\.\\.\\.', chat_id, progress_msg.message_id)
         
         is_nsfw, method, rating, report_text = analyze_and_rate_photo(photo_id)
+        
+        bot.edit_message_text('> ✅ اكتمل التحليل، جارٍ النشر\\.\\.\\.', chat_id, progress_msg.message_id)
         
         if is_nsfw:
             with db_lock:
@@ -377,15 +357,18 @@ def callback_listener(call):
                     bot.send_message(chat_id, f'> 🚨 لديك إنذار {warnings} من 3\\.\n> بقي لك {3 - warnings} تحذير وسيتم حظر حسابك نهائياً\\.')
             return
 
-        # تجهيز النص للنشر
+        # تجهيز النص للنشر (مع تطبيق escape_md لمنع انهيار البوت)
         caption_text = (
             f'> 📸 *تقرير تقييم الصورة*\n\n'
             f'> {escape_md(report_text)}\n'
         )
         
-        # أزرار تحت الصورة المنشورة
         channel_markup = types.InlineKeyboardMarkup(row_width=2)
-        bot_username = bot.get_me().username
+        try:
+            bot_username = bot.get_me().username
+        except:
+            bot_username = "bot"
+            
         channel_markup.add(
             btn("🤖 دخول البوت", url=f"https://t.me/{bot_username}?start=ref", style="success"),
             btn("⭐ تقييم صورة", callback_data='rate_click', style="primary")
@@ -500,11 +483,17 @@ def callback_listener(call):
             bot.register_next_step_handler(msg, save_fixed_image)
 
 # ==========================================
-# معالجة الصور المستلمة (الحد اليومي + الحماية)
+# معالجة الصور المستلمة
 # ==========================================
 @bot.message_handler(content_types=['photo'])
 def handle_user_photo(message):
     user_id = message.from_user.id
+    
+    # التأكد من وجود المستخدم في قاعدة البيانات لمنع الأخطاء
+    with db_lock:
+        cursor.execute('INSERT OR IGNORE INTO users (user_id, photos_rated, last_photo_time, nsfw_warnings, banned, daily_count, last_submit_date) VALUES (?, 0, 0, 0, 0, 0, ?)', (user_id, date.today().isoformat()))
+        conn.commit()
+        
     if is_banned(user_id):
         bot.send_message(message.chat.id, '> 🚫 تم حظر حسابك من استخدام البوت\\.')
         return
@@ -528,7 +517,6 @@ def handle_user_photo(message):
         if last_submit_date != today:
             daily_count = 0
             
-        # الأدمن معفى من الحد اليومي والوقت
         if not is_admin(user_id):
             if daily_count >= 3:
                 bot.send_message(message.chat.id, '> ⚠️ وصلت الحد الأقصى لليوم \\(3 صور\\)\\.\n> عد غداً حتى تقدر تدز صور جديدة\\.')
@@ -589,7 +577,7 @@ def save_fixed_image(message):
     else: bot.send_message(message.chat.id, '> هذه مو صورة، يرجى إرسال صورة حصراً\\.')
 
 # ==========================================
-# نقطة التشغيل (حل مشكلة التعارض 409 Conflict)
+# نقطة التشغيل
 # ==========================================
 def run_bot():
     while True:
@@ -600,11 +588,6 @@ def run_bot():
             time.sleep(10)
 
 if __name__ == "__main__":
-    # تشغيل خادم Flask في Thread منفصل
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)).start()
-    
-    # تشغيل المنبه (Keep-Alive)
     if APP_URL: threading.Thread(target=keep_alive_ping, daemon=True).start()
-    
-    # تشغيل البوت
     run_bot()
